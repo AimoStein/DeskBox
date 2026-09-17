@@ -1,0 +1,250 @@
+<Window x:Class="JianZhuo.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        ShowInTaskbar="True"
+        Width="620"
+        Height="700"
+        Title="简桌设置">
+
+    <Border Margin="16" CornerRadius="14"
+            Background="{DynamicResource BoxBgBrush}"
+            BorderBrush="{DynamicResource BoxBorderBrush}"
+            BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="26" ShadowDepth="4" Direction="270" Opacity="0.28" Color="#000000" />
+        </Border.Effect>
+        <Border CornerRadius="14" Background="{DynamicResource PageBgBrush}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- 头部 -->
+                <Grid Grid.Row="0" Background="Transparent" Margin="22,18,14,10"
+                      MouseLeftButtonDown="Header_MouseLeftButtonDown">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="简桌" FontSize="17" FontWeight="SemiBold" />
+                        <TextBlock Text="离线桌面整理 · 分区盒子 / 一键整理 / 图标隐藏"
+                                   Style="{StaticResource Caption}" Margin="0,4,0,0" />
+                    </StackPanel>
+                    <Button Grid.Column="1" Style="{StaticResource IconButton}" Width="28" Height="28"
+                            Click="Close_Click" ToolTip="关闭" VerticalAlignment="Top">
+                        <Path Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.4"
+                              Data="M0,0 L10,10 M10,0 L0,10" />
+                    </Button>
+                </Grid>
+
+                <!-- 内容 -->
+                <ScrollViewer x:Name="Scroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="22,0,16,0">
+                    <StackPanel>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="一键整理" Style="{StaticResource CardTitle}" />
+                                <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,14"
+                                           Text="把桌面上的文件按类型归入盒子：文档 / 图片 / 视频 / 音乐 / 压缩包 / 文件夹 / 其他。快捷方式和程序不会被移动，整理之后可以一键撤销。" />
+                                <StackPanel Orientation="Horizontal">
+                                    <Button x:Name="BtnOrganize" Content="一键整理桌面"
+                                            Style="{StaticResource PrimaryButton}" Click="Organize_Click" />
+                                    <Button x:Name="BtnUndo" Content="撤销上次整理"
+                                            Style="{StaticResource GhostButton}" Margin="8,0,0,0" Click="Undo_Click" />
+                                    <Button Content="打开盒子文件夹"
+                                            Style="{StaticResource GhostButton}" Margin="8,0,0,0" Click="OpenRoot_Click" />
+                                </StackPanel>
+                                <TextBlock x:Name="LblOrganizeStatus" Style="{StaticResource Caption}"
+                                           Margin="0,12,0,0" Visibility="Collapsed" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="常规" Style="{StaticResource CardTitle}" />
+
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="开机自动启动" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="登录 Windows 后自动运行" Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkAutoStart" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="双击桌面空白处隐藏图标" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="再双击一次恢复；盒子和桌面图标一起隐藏"
+                                                   Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkDoubleClick" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="退出时恢复桌面图标" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="防止退出后桌面一直空着" Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkRestoreIcons" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="显示隐藏文件" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="盒子是否显示带隐藏属性的条目" Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkHidden" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="外观" Style="{StaticResource CardTitle}" />
+
+                                <Grid Margin="0,0,0,16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="主题" Style="{StaticResource RowLabel}" />
+                                    <Border Grid.Column="1" Background="{DynamicResource InputBgBrush}"
+                                            CornerRadius="8" Padding="3">
+                                        <StackPanel Orientation="Horizontal">
+                                            <ToggleButton x:Name="PillLight" Style="{StaticResource PillToggle}"
+                                                          Content="浅色" Click="Theme_Click" Tag="Light" />
+                                            <ToggleButton x:Name="PillDark" Style="{StaticResource PillToggle}"
+                                                          Content="深色" Click="Theme_Click" Tag="Dark" />
+                                            <ToggleButton x:Name="PillSystem" Style="{StaticResource PillToggle}"
+                                                          Content="跟随系统" Click="Theme_Click" Tag="System" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+
+                                <Grid Margin="0,0,0,16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="150" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="52" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="盒子不透明度" Style="{StaticResource RowLabel}" />
+                                    <Slider x:Name="SlOpacity" Grid.Column="1" Style="{StaticResource FlatSlider}"
+                                            Minimum="35" Maximum="100" VerticalAlignment="Center"
+                                            ValueChanged="Slider_ValueChanged" />
+                                    <TextBlock x:Name="LblOpacity" Grid.Column="2" Style="{StaticResource Caption}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+
+                                <Grid Margin="0,0,0,16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="150" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="52" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="图标大小" Style="{StaticResource RowLabel}" />
+                                    <Slider x:Name="SlIcon" Grid.Column="1" Style="{StaticResource FlatSlider}"
+                                            Minimum="32" Maximum="96" VerticalAlignment="Center"
+                                            ValueChanged="Slider_ValueChanged" />
+                                    <TextBlock x:Name="LblIcon" Grid.Column="2" Style="{StaticResource Caption}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="150" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="52" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="圆角" Style="{StaticResource RowLabel}" />
+                                    <Slider x:Name="SlRadius" Grid.Column="1" Style="{StaticResource FlatSlider}"
+                                            Minimum="0" Maximum="22" VerticalAlignment="Center"
+                                            ValueChanged="Slider_ValueChanged" />
+                                    <TextBlock x:Name="LblRadius" Grid.Column="2" Style="{StaticResource Caption}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="整理规则" Style="{StaticResource CardTitle}" />
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="一键整理时包含快捷方式和程序" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="默认不整理快捷方式和可执行程序，避免误伤"
+                                                   Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkShortcuts" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="其他" Style="{StaticResource CardTitle}" />
+                                <TextBlock x:Name="LblLastOrganize" Style="{StaticResource Caption}" Margin="0,0,0,12" />
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="打开配置目录" Style="{StaticResource GhostButton}"
+                                            Click="OpenConfig_Click" />
+                                    <Button Content="查看日志" Style="{StaticResource GhostButton}"
+                                            Margin="8,0,0,0" Click="OpenLog_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="关于" Style="{StaticResource CardTitle}" />
+                                <TextBlock x:Name="LblVersion" Style="{StaticResource Caption}" Margin="0,0,0,6" />
+                                <TextBlock Style="{StaticResource Caption}"
+                                           Text="完全离线运行：不联网、无账号、无同步、无数据上报。所有盒子都对应磁盘上的真实文件夹，删除盒子不会删除文件。" />
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- 底部 -->
+                <Grid Grid.Row="2" Margin="22,8,22,18">
+                    <TextBlock x:Name="LblHint" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                    <Button Content="关闭" Style="{StaticResource PrimaryButton}"
+                            HorizontalAlignment="Right" Click="Close_Click" />
+                </Grid>
+            </Grid>
+        </Border>
+    </Border>
+</Window>
