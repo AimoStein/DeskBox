@@ -60,21 +60,28 @@
 
 卸载 = 删除 exe + 删除 `%APPDATA%\JianZhuo` + 在设置里关掉开机自启。除此之外不写任何系统位置。
 
-## 构建
+## 下载 / 构建
 
-需要 .NET 8 SDK（Windows）。
+**直接拿来用**：Releases 里的 `v1.0.0` 附带了编译好的单文件版 `JianZhuo.exe`（Windows x64，自带 .NET 运行时，双击即可）。仓库是私有的，下载前需要先登录 GitHub。
+
+**自己编译**：需要 .NET 8 SDK（Windows）。工程不引用任何 NuGet 包，离线也能编译。
+已验证：干净克隆 → `dotnet build -c Release` 一次通过，0 警告 0 错误，产物自检全过。
 
 ```powershell
-# 生成多尺寸图标（只需一次，产物是二进制文件所以没有入库）
-pwsh -File tools/make-icon.ps1
+git clone https://github.com/AimoStein/JianZhuo.git
+cd JianZhuo/src/JianZhuo
 
-cd src/JianZhuo
+# 1) 普通编译 —— 产物 bin\Release\net8.0-windows\JianZhuo.exe（约 160 KB）
+#    体积小，但目标机器需要装 .NET 8 桌面运行时
 dotnet build -c Release
 
-# 打成单文件绿色版
+# 2) 单文件绿色版 —— 产物在仓库根的 dist\，自带运行时，拷到哪都能跑
 dotnet publish -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../dist
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+  -p:EnableCompressionInSingleFile=true -o ..\..\dist
 ```
+
+图标 `src/JianZhuo/Assets/app.ico` 已经随仓库提供，**不需要额外生成**；只有想改图标样式时才跑 `pwsh -File tools/make-icon.ps1` 重新生成。
 
 ## 自检
 
