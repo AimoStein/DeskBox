@@ -123,6 +123,15 @@ public partial class SettingsWindow : Window
             : Visibility.Visible;
     }
 
+    /// <summary>一键整理盒子之后的反馈。</summary>
+    public void SetArrangeStatus(string message)
+    {
+        LblArrangeStatus.Text = message;
+        LblArrangeStatus.Visibility = string.IsNullOrEmpty(message)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
     private void Header_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ButtonState == MouseButtonState.Pressed)
@@ -207,6 +216,8 @@ public partial class SettingsWindow : Window
     }
 
     private void Organize_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("organize");
+
+    private void Arrange_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("arrange");
 
     private void OpenRoot_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("openroot");
 

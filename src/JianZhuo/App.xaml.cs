@@ -399,6 +399,10 @@ public partial class App : Application
     {
         switch (command)
         {
+            case "arrange":
+                ArrangeBoxes();
+                break;
+
             case "organize":
                 RunOrganize();
                 break;
@@ -513,6 +517,42 @@ public partial class App : Application
     #endregion
 
     #region 功能
+
+    /// <summary>
+    /// 一键整理盒子：把桌面上的盒子按「先上后左」的顺序排成整齐的行，
+    /// 从屏幕左上角开始摆，间距和盒子之间的距离一致；只动位置，不动盒子里的东西。
+    /// </summary>
+    private void ArrangeBoxes()
+    {
+        var boxes = _boxes.Where(b => b.IsVisible).ToList();
+
+        if (boxes.Count == 0)
+        {
+            const string none = "现在还没有盒子，先在托盘菜单里新建一个吧。";
+            _settings?.SetArrangeStatus(none);
+            _tray?.ShowInfo("简桌", none);
+            return;
+        }
+
+        var area = new Rect(
+            SystemParameters.VirtualScreenLeft,
+            SystemParameters.VirtualScreenTop,
+            SystemParameters.VirtualScreenWidth,
+            SystemParameters.VirtualScreenHeight);
+
+        var placed = BoxArranger.Arrange(boxes.Select(b => b.ContentBox).ToList(), area);
+
+        foreach (var spot in placed)
+        {
+            boxes.FirstOrDefault(b => b.Config.Id == spot.Id)?.MoveContentTo(spot.X, spot.Y);
+        }
+
+        ConfigStore.Save(_config);
+
+        var text = $"已把 {placed.Count} 个盒子排整齐。";
+        _settings?.SetArrangeStatus(text);
+        _tray?.ShowInfo("简桌", text);
+    }
 
     private void RunOrganize()
     {

@@ -359,6 +359,45 @@ public static class SelfTest
             Check("顿挫-列表视图宽度自由", Math.Abs(listWidth.Width - 300) < 0.001, $"宽={listWidth.Width:0.##}");
             Check("顿挫-格子太小就不动", CellGrid.SnapResize(origin, 1, 2, 3, 4, "R", 0, 0, 0, 0, 1, 1, 1) == new Rect(1, 2, 3, 4));
 
+            // 11.9) 一键整理盒子：排整齐
+            var messy = new List<BoxRect>
+            {
+                new("b", 700, 300, 200, 150),
+                new("a", 100, 20, 200, 150),
+                new("c", 400, 25, 200, 150),
+            };
+
+            Check("排盒子-空列表不炸",
+                BoxArranger.Arrange(Array.Empty<BoxRect>(), new Rect(0, 0, 1000, 800)).Count == 0);
+
+            var oneRow = BoxArranger.Arrange(messy, new Rect(0, 0, 1000, 800));
+            Check("排盒子-按上下左右顺序排", string.Join(",", oneRow.Select(b => b.Id)) == "a,c,b",
+                string.Join(",", oneRow.Select(b => b.Id)));
+            Check("排盒子-贴顶部、水平居中",
+                Math.Abs((oneRow[0].X + oneRow[^1].Right) / 2 - 500) < 0.001 &&
+                Math.Abs(oneRow[0].Y - BoxLayout.SnapGap) < 0.001,
+                $"左={oneRow[0].X:0.##} 右={oneRow[^1].Right:0.##} 顶={oneRow[0].Y:0.##}");
+            Check("排盒子-同一行顶部对齐",
+                oneRow[1].Y == oneRow[0].Y && oneRow[2].Y == oneRow[0].Y);
+            Check("排盒子-左右间距一致",
+                Math.Abs(oneRow[1].X - oneRow[0].Right - BoxLayout.SnapGap) < 0.001 &&
+                Math.Abs(oneRow[2].X - oneRow[1].Right - BoxLayout.SnapGap) < 0.001);
+            Check("排盒子-盒子尺寸不变", oneRow.All(b => b.Width == 200 && b.Height == 150));
+            Check("排盒子-左右两侧留白对称",
+                Math.Abs(oneRow[0].X - (1000 - oneRow[^1].Right)) < 0.001,
+                $"左={oneRow[0].X:0.##} 右={1000 - oneRow[^1].Right:0.##}");
+
+            var wrapped = BoxArranger.Arrange(messy, new Rect(0, 0, 560, 800));
+            Check("排盒子-一行摆不下就换行",
+                Math.Abs(wrapped[2].X - (560 - 200) / 2.0) < 0.001 &&
+                Math.Abs(wrapped[2].Y - (BoxLayout.SnapGap * 2 + 150)) < 0.001,
+                $"({wrapped[2].X:0.##},{wrapped[2].Y:0.##})");
+            Check("排盒子-换行后行距留够",
+                Math.Abs(wrapped[2].Y - (wrapped[0].Bottom + BoxLayout.SnapGap)) < 0.001);
+            Check("排盒子-换行后单独一行也居中",
+                Math.Abs(wrapped[0].X + wrapped[1].Right - 560) < 0.001,
+                $"左={wrapped[0].X:0.##} 右={560 - wrapped[1].Right:0.##}");
+
             // 12) 盒子里的显示名：快捷方式不显示扩展名
             var shortcut = new BoxItem(Path.Combine(layoutRoot, "微信.lnk"), 48);
             Check("显示名-快捷方式隐藏 lnk", shortcut.Name == "微信", shortcut.Name);

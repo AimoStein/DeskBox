@@ -19,10 +19,11 @@ public sealed class TrayService : IDisposable
             Padding = new WinForms.Padding(0, 4, 0, 4),
         };
 
-        ItemOrganize = Add("一键整理桌面", "organize");
+        ItemArrange = Add("整理盒子（排列整齐）", "arrange");
         ItemNewBox = Add("新建盒子", "newbox");
-        ItemUndo = Add("撤销上次整理", "undo");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
+        ItemOrganize = Add("整理桌面文件到盒子", "organize");
+        ItemUndo = Add("撤销上次整理", "undo");
         ItemToggleIcons = Add("显示 / 隐藏桌面图标", "toggleicons");
         ItemBoxRoot = Add("打开盒子文件夹", "openroot");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
@@ -49,6 +50,8 @@ public sealed class TrayService : IDisposable
     public event Action? MenuOpening;
 
     public WinForms.ToolStripMenuItem ItemOrganize { get; }
+
+    public WinForms.ToolStripMenuItem ItemArrange { get; }
 
     public WinForms.ToolStripMenuItem ItemNewBox { get; }
 

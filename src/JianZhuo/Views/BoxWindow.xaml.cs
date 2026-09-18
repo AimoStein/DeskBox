@@ -149,6 +149,17 @@ public partial class BoxWindow : Window
         }
     }
 
+    /// <summary>把盒子挪到指定的桌面坐标（一键整理盒子时用），同样不会跑出屏幕。</summary>
+    internal void MoveContentTo(double x, double y)
+    {
+        var bounded = BoxLayout.ClampToArea(
+            new BoxRect(_box.Id, x, y, ContentRect.Width, ContentRect.Height),
+            DesktopBounds);
+
+        SetScreenBounds(bounded.X - ShadowPad, bounded.Y - ShadowPad, Width, Height);
+        PersistGeometry();
+    }
+
     #region 初始化
 
     private void SetupTimers()

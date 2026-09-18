@@ -35,7 +35,7 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel>
                         <TextBlock Text="简桌" FontSize="17" FontWeight="SemiBold" />
-                        <TextBlock Text="离线桌面整理 · 分区盒子 / 一键整理 / 图标隐藏"
+                        <TextBlock Text="离线桌面整理 · 分区盒子 / 一键整理盒子 / 图标隐藏"
                                    Style="{StaticResource Caption}" Margin="0,4,0,0" />
                     </StackPanel>
                     <Button Grid.Column="1" Style="{StaticResource IconButton}" Width="28" Height="28"
@@ -51,16 +51,30 @@
 
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
-                                <TextBlock Text="一键整理" Style="{StaticResource CardTitle}" />
+                                <TextBlock Text="整理盒子" Style="{StaticResource CardTitle}" />
+                                <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,14"
+                                           Text="把桌面上的多个盒子一键排整齐：按盒子现在的上下左右顺序，从屏幕左上角开始摆好，间距一致、每一行顶部对齐。只挪盒子的位置，盒子里的文件不动。" />
+                                <StackPanel Orientation="Horizontal">
+                                    <Button x:Name="BtnArrange" Content="一键整理盒子"
+                                            Style="{StaticResource PrimaryButton}" Click="Arrange_Click" />
+                                    <Button Content="打开盒子文件夹"
+                                            Style="{StaticResource GhostButton}" Margin="8,0,0,0" Click="OpenRoot_Click" />
+                                </StackPanel>
+                                <TextBlock x:Name="LblArrangeStatus" Style="{StaticResource Caption}"
+                                           Margin="0,12,0,0" Visibility="Collapsed" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Text="整理桌面文件" Style="{StaticResource CardTitle}" />
                                 <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,14"
                                            Text="把桌面上的文件按类型归入盒子：文档 / 图片 / 视频 / 音乐 / 压缩包 / 文件夹 / 其他。快捷方式和程序不会被移动，整理之后可以一键撤销。" />
                                 <StackPanel Orientation="Horizontal">
-                                    <Button x:Name="BtnOrganize" Content="一键整理桌面"
-                                            Style="{StaticResource PrimaryButton}" Click="Organize_Click" />
+                                    <Button x:Name="BtnOrganize" Content="整理桌面文件到盒子"
+                                            Style="{StaticResource GhostButton}" Click="Organize_Click" />
                                     <Button x:Name="BtnUndo" Content="撤销上次整理"
                                             Style="{StaticResource GhostButton}" Margin="8,0,0,0" Click="Undo_Click" />
-                                    <Button Content="打开盒子文件夹"
-                                            Style="{StaticResource GhostButton}" Margin="8,0,0,0" Click="OpenRoot_Click" />
                                 </StackPanel>
                                 <TextBlock x:Name="LblOrganizeStatus" Style="{StaticResource Caption}"
                                            Margin="0,12,0,0" Visibility="Collapsed" />
