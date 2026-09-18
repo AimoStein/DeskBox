@@ -19,6 +19,9 @@ public partial class BoxWindow : Window
     public const double ShadowPad = 12;
     private const double TitleHeight = 34;
 
+    /// <summary>盒内拖动时捎带的来源标记，用来区分「盒内排序」和「跨盒子移动」。</summary>
+    internal const string BoxDragFormat = "JianZhuo.BoxItems";
+
     private readonly AppConfig _config;
     private readonly BoxConfig _box;
     private readonly DesktopShell _shell;
@@ -43,6 +46,14 @@ public partial class BoxWindow : Window
     private Point _moveStart;
     private Rect _moveOrigin;
     private bool _wantVisible = true;
+
+    // 缩放顿挫：按下时量一次格子 / 留白，整段拖动都用这一份，避免越拖越漂
+    private double _resizeCellWidth;
+    private double _resizeCellHeight;
+    private double _resizeChromeWidth;
+    private double _resizeChromeHeight;
+    private int _resizeColumns;
+    private int _resizeRows;
 
     public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell, Func<string, IReadOnlyList<BoxRect>>? peers = null)
     {
@@ -90,6 +101,13 @@ public partial class BoxWindow : Window
 
     public BoxRect ContentBox =>
         new(_box.Id, ContentRect.X, ContentRect.Y, ContentRect.Width, ContentRect.Height);
+
+    /// <summary>盒子能待在的区域：整个虚拟桌面（多显示器时含所有屏幕），单位 DIP。</summary>
+    private static Rect DesktopBounds => new(
+        SystemParameters.VirtualScreenLeft,
+        SystemParameters.VirtualScreenTop,
+        SystemParameters.VirtualScreenWidth,
+        SystemParameters.VirtualScreenHeight);
 
     public string Folder
     {
@@ -193,8 +211,8 @@ public partial class BoxWindow : Window
 
         AllowDrop = true;
         DragEnter += Box_DragEnter;
-        DragOver += Box_DragEnter;
-        DragLeave += (_, _) => DropHighlight.Visibility = Visibility.Collapsed;
+        DragOver += Box_DragOver;
+        DragLeave += (_, _) => ClearDropFeedback();
         Drop += Box_Drop;
 
         PreviewMouseWheel += Box_PreviewMouseWheel;
@@ -344,8 +362,14 @@ public partial class BoxWindow : Window
 
         Width = _box.Width + ShadowPad * 2;
         Height = (_box.Collapsed ? TitleHeight + 8 : _box.Height) + ShadowPad * 2;
-        Left = _box.X - ShadowPad;
-        Top = _box.Y - ShadowPad;
+
+        // 配置里的坐标可能来自别的显示器布局（换屏 / 分辨率变化），启动时先拉回屏幕内
+        var bounded = BoxLayout.ClampToArea(
+            new BoxRect(_box.Id, _box.X, _box.Y, Width - ShadowPad * 2, Height - ShadowPad * 2),
+            DesktopBounds);
+
+        Left = bounded.X - ShadowPad;
+        Top = bounded.Y - ShadowPad;
 
         _suppressPersist = false;
     }
@@ -532,6 +556,9 @@ public partial class BoxWindow : Window
             return string.Compare(Path.GetFileName(a), Path.GetFileName(b), StringComparison.CurrentCultureIgnoreCase);
         });
 
+        // 用户手动拖出来的顺序优先，没记录过的（新放进来的）按上面的默认规则排在后面
+        paths = ItemOrder.Sort(paths, _box.ItemOrder, Path.GetFileName);
+
         _items.Clear();
         var size = (int)_config.IconSize;
 
@@ -584,17 +611,187 @@ public partial class BoxWindow : Window
         e.Handled = true;
     }
 
+    /// <summary>拖动经过时除了高亮整个盒子，还标出「会落到第几条前面」。</summary>
+    private void Box_DragOver(object sender, DragEventArgs e)
+    {
+        var ok = e.Data.GetDataPresent(DataFormats.FileDrop);
+        e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
+        DropHighlight.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
+        ShowInsertMark(ok ? InsertIndexFor(e.GetPosition(ItemsHost)) : -1);
+        e.Handled = true;
+    }
+
     private void Box_Drop(object sender, DragEventArgs e)
     {
-        DropHighlight.Visibility = Visibility.Collapsed;
+        var insertIndex = InsertIndexFor(e.GetPosition(ItemsHost));
+        ClearDropFeedback();
 
-        if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0)
+        if (e.Data is { } data)
+        {
+            HandleDrop(data, insertIndex);
+        }
+
+        e.Handled = true;
+    }
+
+    /// <summary>当前显示顺序（自检用）。</summary>
+    internal IReadOnlyList<string> ItemNames =>
+        _items.Select(item => Path.GetFileName(item.Path)).ToList();
+
+    /// <summary>
+    /// 落到这个盒子上：盒内拖动 = 调整顺序（不碰磁盘），跨盒子 / 从外面拖 = 搬进来并放到落点位置。
+    /// </summary>
+    internal void HandleDrop(IDataObject data, int insertIndex)
+    {
+        if (data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0)
+        {
+            Log.Warn("拖动落点：没有拿到文件列表，忽略。");
+            return;
+        }
+
+        Log.Info($"拖动落点：{paths.Length} 项 → 「{_box.Title}」第 {insertIndex} 位");
+
+        // 同一个盒子内部拖动：只调整显示顺序，磁盘上的文件不动
+        if (data.GetDataPresent(BoxDragFormat) &&
+            data.GetData(BoxDragFormat) is string sourceFolder &&
+            IsSameFolder(sourceFolder, Folder))
+        {
+            var moving = _items
+                .Where(item => paths.Contains(item.Path, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            if (moving.Count > 0)
+            {
+                ApplyOrder(moving, insertIndex);
+            }
+
+            return;
+        }
+
+        MoveIntoBoxAt(paths, insertIndex);
+    }
+
+    private void ClearDropFeedback()
+    {
+        DropHighlight.Visibility = Visibility.Collapsed;
+        ShowInsertMark(-1);
+    }
+
+    /// <summary>把插入标记画在第 index 条前面；index 为 -1 时全部清掉。</summary>
+    private void ShowInsertMark(int index)
+    {
+        for (var i = 0; i < _items.Count; i++)
+        {
+            _items[i].InsertMark = i == index;
+        }
+    }
+
+    /// <summary>算出光标落在第几个位置（0 ~ 条目数）：图标视图按行优先，列表视图按上下。</summary>
+    private int InsertIndexFor(Point point)
+    {
+        for (var i = 0; i < _items.Count; i++)
+        {
+            if (ItemsHost.ItemContainerGenerator.ContainerFromIndex(i) is not FrameworkElement container ||
+                container.RenderSize.Width <= 0 ||
+                container.RenderSize.Height <= 0)
+            {
+                continue;
+            }
+
+            var origin = container.TransformToAncestor(ItemsHost).Transform(new Point(0, 0));
+
+            // 光标还在这一条所在行的上面 → 就插在它前面
+            if (point.Y < origin.Y)
+            {
+                return i;
+            }
+
+            // 同一行：落在这一条的左半边就插在它前面，右半边继续看下一列
+            if (point.Y <= origin.Y + container.RenderSize.Height)
+            {
+                if (point.X < origin.X + container.RenderSize.Width / 2)
+                {
+                    return i;
+                }
+
+                continue;
+            }
+        }
+
+        return _items.Count;
+    }
+
+    /// <summary>按拖拽落点重排条目，并把顺序写回配置。</summary>
+    private void ApplyOrder(IReadOnlyList<BoxItem> moving, int insertIndex)
+    {
+        var names = _items.Select(item => Path.GetFileName(item.Path)).ToList();
+        var movingNames = moving.Select(item => Path.GetFileName(item.Path)).ToList();
+        var ordered = ItemOrder.Apply(names, movingNames, insertIndex);
+
+        var byName = _items
+            .GroupBy(item => Path.GetFileName(item.Path), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+        var rebuilt = ordered.Where(byName.ContainsKey).Select(name => byName[name]).ToList();
+
+        if (rebuilt.Count != _items.Count)
         {
             return;
         }
 
-        MoveIntoBox(paths);
-        e.Handled = true;
+        for (var i = 0; i < rebuilt.Count; i++)
+        {
+            if (ReferenceEquals(_items[i], rebuilt[i]))
+            {
+                continue;
+            }
+
+            // 顺序真的变了才重建一遍，避免白刷控件
+            _items.Clear();
+            foreach (var item in rebuilt)
+            {
+                _items.Add(item);
+            }
+
+            PersistOrder();
+            return;
+        }
+    }
+
+    private void PersistOrder()
+    {
+        _box.ItemOrder = _items.Select(item => Path.GetFileName(item.Path)).ToList();
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static bool IsSameFolder(string a, string b)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>把条目搬进这个盒子，并放到第 index 个位置。</summary>
+    private void MoveIntoBoxAt(IEnumerable<string> paths, int insertIndex)
+    {
+        var pathList = paths.ToList();
+        var before = new HashSet<string>(_items.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);
+
+        MoveIntoBox(pathList);
+
+        var added = _items.Where(item => !before.Contains(item.Path)).ToList();
+        if (added.Count > 0)
+        {
+            ApplyOrder(added, insertIndex);
+        }
     }
 
     public void MoveIntoBox(IEnumerable<string> paths)
@@ -662,7 +859,9 @@ public partial class BoxWindow : Window
             return;
         }
 
-        var data = new DataObject(DataFormats.FileDrop, paths);
+        var data = new DataObject();
+        data.SetData(DataFormats.FileDrop, paths);
+        data.SetData(BoxDragFormat, Folder);
         _dragging = true;
         try
         {
@@ -1134,14 +1333,32 @@ public partial class BoxWindow : Window
         var top = _moveOrigin.Top + (screenPoint.Y - _moveStart.Y);
 
         var desired = new BoxRect(_box.Id, left + ShadowPad, top + ShadowPad, ContentRect.Width, ContentRect.Height);
+        BoxRect placed;
 
         if (_config.AutoAlignBoxes && _peers is not null)
         {
             var snap = BoxLayout.Snap(desired, _peers(_box.Id));
-            left += snap.X - desired.X;
-            top += snap.Y - desired.Y;
-            ShowGuides(snap);
+            var snapped = desired.WithPosition(snap.X, snap.Y);
+
+            // 屏幕边缘优先：被边界挡住时盒子会留在边缘内侧，参考线也就不再成立
+            placed = BoxLayout.ClampToArea(snapped, DesktopBounds);
+
+            if (Math.Abs(placed.X - snapped.X) > 0.01 || Math.Abs(placed.Y - snapped.Y) > 0.01)
+            {
+                HideGuides();
+            }
+            else
+            {
+                ShowGuides(snap);
+            }
         }
+        else
+        {
+            placed = BoxLayout.ClampToArea(desired, DesktopBounds);
+        }
+
+        left += placed.X - desired.X;
+        top += placed.Y - desired.Y;
 
         _suppressPersist = true;
         SetScreenBounds(left, top, Width, Height);
@@ -1185,6 +1402,15 @@ public partial class BoxWindow : Window
 
                 SetScreenBounds(spot.X - ShadowPad, spot.Y - ShadowPad, Width, Height);
             }
+        }
+
+        // 收尾兜底：避让之后也不该把盒子留在屏幕外
+        var current = ContentBox;
+        var bounded = BoxLayout.ClampToArea(current, DesktopBounds);
+
+        if (Math.Abs(bounded.X - current.X) > 0.01 || Math.Abs(bounded.Y - current.Y) > 0.01)
+        {
+            SetScreenBounds(bounded.X - ShadowPad, bounded.Y - ShadowPad, Width, Height);
         }
 
         // 只是点了一下、位置没变就不用写配置
@@ -1254,6 +1480,7 @@ public partial class BoxWindow : Window
         _resizeDirection = (sender as FrameworkElement)?.Tag as string ?? string.Empty;
         _resizeStart = ScreenPoint(e.GetPosition(this));
         _resizeOrigin = ScreenBounds;
+        MeasureResizeGrid();
 
         Mouse.Capture((IInputElement)sender);
         MouseMove += Resize_MouseMove;
@@ -1302,8 +1529,54 @@ public partial class BoxWindow : Window
             height = Math.Max(minHeight, _resizeOrigin.Height + dy);
         }
 
+        // 按图标格子顿挫：宽度整列跳，高度整行跳；加宽时高度自动收成刚好装下的行数
+        if (!_box.Collapsed && _resizeCellWidth > 1 && _resizeCellHeight > 1)
+        {
+            var snapped = CellGrid.SnapResize(
+                _resizeOrigin, left, top, width, height, _resizeDirection,
+                _resizeCellWidth, _resizeCellHeight, _resizeChromeWidth, _resizeChromeHeight,
+                _resizeColumns, _resizeRows, Math.Max(1, _items.Count),
+                snapColumns: !_box.ListView);
+
+            left = snapped.X;
+            top = snapped.Y;
+            width = snapped.Width;
+            height = snapped.Height;
+        }
+
         _suppressPersist = true;
         SetScreenBounds(left, top, width, height);
+    }
+
+    /// <summary>
+    /// 按下缩放条时量一次：一个条目占的格子、以及标题栏 / 边框那些不属于格子的留白。
+    /// 之后整段拖动都用这一份，否则每动一下都用新尺寸重算，框会越拖越漂。
+    /// </summary>
+    private void MeasureResizeGrid()
+    {
+        _resizeCellWidth = 0;
+        _resizeCellHeight = 0;
+        _resizeChromeWidth = 0;
+        _resizeChromeHeight = 0;
+        _resizeColumns = 0;
+        _resizeRows = 0;
+
+        if (ItemsHost.ItemContainerGenerator.ContainerFromIndex(0) is not FrameworkElement container ||
+            container.ActualWidth <= 4 ||
+            container.ActualHeight <= 4 ||
+            _items.Count == 0)
+        {
+            return;
+        }
+
+        _resizeCellWidth = container.ActualWidth;
+        _resizeCellHeight = container.ActualHeight;
+        _resizeColumns = CellGrid.Count(ItemsHost.ActualWidth, _resizeCellWidth);
+        _resizeRows = CellGrid.CellsFor(_items.Count, _resizeColumns);
+        _resizeChromeWidth = _resizeOrigin.Width - _resizeColumns * _resizeCellWidth;
+        _resizeChromeHeight = Scroller.ActualHeight > 8
+            ? _resizeOrigin.Height - (Scroller.ActualHeight - 4)
+            : _resizeOrigin.Height - _resizeRows * _resizeCellHeight;
     }
 
     private void Resize_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => EndResize();
@@ -1314,6 +1587,16 @@ public partial class BoxWindow : Window
         MouseLeftButtonUp -= Resize_MouseLeftButtonUp;
         Mouse.Capture(null);
         _resizeDirection = string.Empty;
+
+        // 拉大盒子时右 / 下边缘可能出屏，收尾把整个盒子挪回屏幕内
+        var current = ContentBox;
+        var bounded = BoxLayout.ClampToArea(current, DesktopBounds);
+
+        if (Math.Abs(bounded.X - current.X) > 0.01 || Math.Abs(bounded.Y - current.Y) > 0.01)
+        {
+            SetScreenBounds(bounded.X - ShadowPad, bounded.Y - ShadowPad, Width, Height);
+        }
+
         _suppressPersist = false;
         PersistGeometry();
     }

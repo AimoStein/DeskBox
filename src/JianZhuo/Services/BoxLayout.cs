@@ -136,6 +136,34 @@ public static class BoxLayout
     }
 
     /// <summary>
+    /// 把盒子约束在可视区域内：四周至少留出 gap 的间距（和两个盒子之间的间距一致）。
+    /// 拖到屏幕外时用它把盒子拉回边缘内侧，而不是停在看不见的地方。
+    /// 盒子比区域还大时贴住左上角，保证左上边缘始终可见。
+    /// </summary>
+    public static BoxRect ClampToArea(BoxRect box, Rect area, double gap = SnapGap)
+    {
+        if (area.Width <= 0 || area.Height <= 0 || double.IsNaN(area.Width) || double.IsNaN(area.Height))
+        {
+            return box;
+        }
+
+        var minX = area.Left + gap;
+        var minY = area.Top + gap;
+        var maxX = area.Right - gap - box.Width;
+        var maxY = area.Bottom - gap - box.Height;
+
+        var x = maxX <= minX ? minX : Math.Clamp(box.X, minX, maxX);
+        var y = maxY <= minY ? minY : Math.Clamp(box.Y, minY, maxY);
+
+        if (Math.Abs(x - box.X) < 0.01 && Math.Abs(y - box.Y) < 0.01)
+        {
+            return box;
+        }
+
+        return box.WithPosition(x, y);
+    }
+
+    /// <summary>
     /// 把正在拖动的盒子吸附到其他盒子的边或中线上；阈值内没有可对齐的目标时位置不变。
     /// </summary>
     public static SnapResult Snap(BoxRect moving, IReadOnlyList<BoxRect> peers, double threshold = AlignThreshold)

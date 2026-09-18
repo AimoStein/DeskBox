@@ -220,6 +220,145 @@ public static class SelfTest
                 Math.Abs(configA.X - dropped.X) < 0.001 && Math.Abs(configA.Y - dropped.Y) < 0.001,
                 $"({configA.X:0.##},{configA.Y:0.##})");
 
+            // 11.5) 盒子不许跑到屏幕外：拖出去自动回到边缘内侧，留出和盒子之间一样的间距
+            var screen = new Rect(
+                SystemParameters.VirtualScreenLeft,
+                SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth,
+                SystemParameters.VirtualScreenHeight);
+
+            var oversized = BoxLayout.ClampToArea(
+                new BoxRect("big", screen.Right + 500, screen.Bottom + 500, screen.Width + 800, screen.Height + 800),
+                screen);
+            Check("屏幕外-盒子比屏幕还大时贴住左上角",
+                Math.Abs(oversized.X - (screen.Left + BoxLayout.SnapGap)) < 0.001 &&
+                Math.Abs(oversized.Y - (screen.Top + BoxLayout.SnapGap)) < 0.001,
+                $"({oversized.X:0.##},{oversized.Y:0.##})");
+
+            var keepInside = BoxLayout.ClampToArea(new BoxRect("in", 400, 300, 200, 150), screen);
+            Check("屏幕内-位置不受影响",
+                Math.Abs(keepInside.X - 400) < 0.001 && Math.Abs(keepInside.Y - 300) < 0.001,
+                $"({keepInside.X:0.##},{keepInside.Y:0.##})");
+
+            Drag(windows[0], screen.Left - 5000, screen.Top - 5000);
+            var pulledTopLeft = windows[0].ContentBox;
+            Check("屏幕外-拖出左上角会回到边缘内",
+                Math.Abs(pulledTopLeft.X - (screen.Left + BoxLayout.SnapGap)) < 0.5 &&
+                Math.Abs(pulledTopLeft.Y - (screen.Top + BoxLayout.SnapGap)) < 0.5,
+                $"({pulledTopLeft.X:0.##},{pulledTopLeft.Y:0.##})");
+
+            Drag(windows[0], screen.Right + 5000, screen.Bottom + 5000);
+            var pulledBottomRight = windows[0].ContentBox;
+            Check("屏幕外-拖出右下角会回到边缘内",
+                Math.Abs(pulledBottomRight.Right - (screen.Right - BoxLayout.SnapGap)) < 0.5 &&
+                Math.Abs(pulledBottomRight.Bottom - (screen.Bottom - BoxLayout.SnapGap)) < 0.5,
+                $"({pulledBottomRight.X:0.##},{pulledBottomRight.Y:0.##})");
+
+            Drag(windows[0], 500, 500);
+            var insideAgain = windows[0].ContentBox;
+            Check("屏幕内-拖回中间能正常落位",
+                Math.Abs(insideAgain.X - 500) < 0.001 && Math.Abs(insideAgain.Y - 500) < 0.001,
+                $"({insideAgain.X:0.##},{insideAgain.Y:0.##})");
+
+            // 11.6) 盒内拖动排序 / 跨盒子落位的顺序计算
+            var order = new List<string> { "A", "B", "C", "D" };
+            Check("排序-往后挪一条",
+                string.Join(",", ItemOrder.Apply(order, new[] { "A" }, 3)) == "B,C,A,D",
+                string.Join(",", ItemOrder.Apply(order, new[] { "A" }, 3)));
+            Check("排序-往前挪一条",
+                string.Join(",", ItemOrder.Apply(order, new[] { "D" }, 1)) == "A,D,B,C",
+                string.Join(",", ItemOrder.Apply(order, new[] { "D" }, 1)));
+            Check("排序-多条一起挪",
+                string.Join(",", ItemOrder.Apply(order, new[] { "B", "C" }, 4)) == "A,D,B,C",
+                string.Join(",", ItemOrder.Apply(order, new[] { "B", "C" }, 4)));
+            Check("排序-落点没变就不动",
+                string.Join(",", ItemOrder.Apply(order, new[] { "B" }, 1)) == "A,B,C,D",
+                string.Join(",", ItemOrder.Apply(order, new[] { "B" }, 1)));
+
+            var manual = ItemOrder.Sort(new[] { "b.lnk", "a.lnk", "c.lnk" }, new[] { "c.lnk", "b.lnk" }, name => name);
+            Check("排序-按记录的顺序显示，新条目在后面",
+                string.Join(",", manual) == "c.lnk,b.lnk,a.lnk", string.Join(",", manual));
+
+            var orderConfig = new AppConfig();
+            orderConfig.Boxes.Add(new BoxConfig
+            {
+                Title = "顺序盒子", Folder = boxRoot, ItemOrder = { "微信.lnk", "合同.docx" },
+            });
+            var orderJson = System.Text.Json.JsonSerializer.Serialize(orderConfig);
+            var orderBack = System.Text.Json.JsonSerializer.Deserialize<AppConfig>(orderJson);
+            Check("排序-顺序随配置保存",
+                orderBack?.Boxes[0].ItemOrder.Count == 2 && orderBack.Boxes[0].ItemOrder[0] == "微信.lnk",
+                string.Join(",", orderBack?.Boxes[0].ItemOrder ?? new List<string>()));
+
+            // 11.7) 拖动落点：盒内排序 / 跨盒子移动 / 从外面拖进来（直接喂给落点处理，不动真实鼠标）
+            foreach (var name in new[] { "a.txt", "b.txt", "c.txt" })
+            {
+                File.WriteAllText(Path.Combine(folderA, name), "x");
+            }
+
+            windows[0].ReloadItems();
+            Check("拖动-盒子内容已就绪", string.Join(",", windows[0].ItemNames) == "a.txt,b.txt,c.txt",
+                string.Join(",", windows[0].ItemNames));
+
+            var moveInside = new DataObject();
+            moveInside.SetData(DataFormats.FileDrop, new[] { Path.Combine(folderA, "c.txt") });
+            moveInside.SetData(BoxWindow.BoxDragFormat, folderA);
+            windows[0].HandleDrop(moveInside, 0);
+            Check("拖动-盒内排序", string.Join(",", windows[0].ItemNames) == "c.txt,a.txt,b.txt",
+                string.Join(",", windows[0].ItemNames));
+            Check("拖动-盒内排序不动磁盘文件",
+                File.Exists(Path.Combine(folderA, "a.txt")) && File.Exists(Path.Combine(folderA, "c.txt")));
+            Check("拖动-盒内排序写回配置", string.Join(",", configA.ItemOrder) == "c.txt,a.txt,b.txt",
+                string.Join(",", configA.ItemOrder));
+
+            var moveAcross = new DataObject();
+            moveAcross.SetData(DataFormats.FileDrop, new[] { Path.Combine(folderA, "c.txt") });
+            moveAcross.SetData(BoxWindow.BoxDragFormat, folderA);
+            windows[1].HandleDrop(moveAcross, 0);
+            Check("拖动-跨盒子会搬走文件",
+                File.Exists(Path.Combine(folderB, "c.txt")) && !File.Exists(Path.Combine(folderA, "c.txt")));
+            Check("拖动-跨盒子落在指定位置", string.Join(",", windows[1].ItemNames) == "c.txt",
+                string.Join(",", windows[1].ItemNames));
+
+            windows[0].ReloadItems();
+            Check("拖动-原来的盒子少了一条", string.Join(",", windows[0].ItemNames) == "a.txt,b.txt",
+                string.Join(",", windows[0].ItemNames));
+
+            var externalPath = Path.Combine(sandbox, "外部文件.txt");
+            File.WriteAllText(externalPath, "x");
+            var fromOutside = new DataObject();
+            fromOutside.SetData(DataFormats.FileDrop, new[] { externalPath });
+            windows[1].HandleDrop(fromOutside, 0);
+            Check("拖动-外部文件落到最前面",
+                windows[1].ItemNames.Count == 2 && windows[1].ItemNames[0] == "外部文件.txt",
+                string.Join(",", windows[1].ItemNames));
+
+            // 11.8) 缩放顿挫：宽高按图标格子跳，加宽时高度自动收放
+            Check("顿挫-一段宽度能放几列", CellGrid.Count(700, 70) == 10, CellGrid.Count(700, 70).ToString());
+            Check("顿挫-12 个图标 3 列 = 4 行", CellGrid.CellsFor(12, 3) == 4, CellGrid.CellsFor(12, 3).ToString());
+            Check("顿挫-12 个图标 4 列 = 3 行", CellGrid.CellsFor(12, 4) == 3, CellGrid.CellsFor(12, 4).ToString());
+
+            // 3 列 × 4 行、格子 70×92、边框留白 36 / 34
+            var origin = new Rect(100, 100, 246, 402);
+
+            var widened = CellGrid.SnapResize(origin, 100, 100, 320, 402, "R", 70, 92, 36, 34, 3, 4, 12);
+            Check("顿挫-往右加宽正好一列", Math.Abs(widened.Width - (36 + 4 * 70)) < 0.001, $"宽={widened.Width:0.##}");
+            Check("顿挫-加宽后高度收到 3 行", Math.Abs(widened.Height - (34 + 3 * 92)) < 0.001, $"高={widened.Height:0.##}");
+
+            var narrowed = CellGrid.SnapResize(origin, 100, 100, 176, 402, "R", 70, 92, 36, 34, 3, 4, 12);
+            Check("顿挫-往左收窄一列", Math.Abs(narrowed.Width - (36 + 2 * 70)) < 0.001, $"宽={narrowed.Width:0.##}");
+            Check("顿挫-收窄后高度放到 6 行", Math.Abs(narrowed.Height - (34 + 6 * 92)) < 0.001, $"高={narrowed.Height:0.##}");
+
+            var taller = CellGrid.SnapResize(origin, 100, 100, 246, 300, "B", 70, 92, 36, 34, 3, 4, 12);
+            Check("顿挫-拖下边按行跳", Math.Abs(taller.Height - (34 + 3 * 92)) < 0.001, $"高={taller.Height:0.##}");
+
+            var fromLeft = CellGrid.SnapResize(origin, 40, 100, 350, 402, "L", 70, 92, 36, 34, 3, 4, 12);
+            Check("顿挫-拖左边时右边缘不动", Math.Abs(fromLeft.Right - origin.Right) < 0.001, $"右={fromLeft.Right:0.##}");
+
+            var listWidth = CellGrid.SnapResize(origin, 100, 100, 300, 300, "R", 70, 92, 36, 34, 3, 4, 12, snapColumns: false);
+            Check("顿挫-列表视图宽度自由", Math.Abs(listWidth.Width - 300) < 0.001, $"宽={listWidth.Width:0.##}");
+            Check("顿挫-格子太小就不动", CellGrid.SnapResize(origin, 1, 2, 3, 4, "R", 0, 0, 0, 0, 1, 1, 1) == new Rect(1, 2, 3, 4));
+
             // 12) 盒子里的显示名：快捷方式不显示扩展名
             var shortcut = new BoxItem(Path.Combine(layoutRoot, "微信.lnk"), 48);
             Check("显示名-快捷方式隐藏 lnk", shortcut.Name == "微信", shortcut.Name);

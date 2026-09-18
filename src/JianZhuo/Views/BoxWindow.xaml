@@ -23,61 +23,77 @@
         </ItemsPanelTemplate>
 
         <DataTemplate x:Key="IconItemTemplate">
-            <Border x:Name="Host" Width="{Binding ItemWidth}" Background="Transparent" CornerRadius="7"
-                    Margin="1" Padding="4,6">
-                <Border.Style>
-                    <Style TargetType="Border">
-                        <Style.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
-                            </Trigger>
-                        </Style.Triggers>
-                    </Style>
-                </Border.Style>
-                <StackPanel>
-                    <Image Source="{Binding Icon}" Width="{Binding IconSize}" Height="{Binding IconSize}"
-                           RenderOptions.BitmapScalingMode="HighQuality" />
-                    <TextBlock Text="{Binding Name}" FontSize="11.5" Margin="0,6,0,0" MaxHeight="30"
-                               TextWrapping="Wrap" TextAlignment="Center"
-                               Foreground="{DynamicResource TextPrimaryBrush}" />
-                </StackPanel>
-            </Border>
+            <Grid>
+                <Border x:Name="Host" Width="{Binding ItemWidth}" Height="{Binding ItemHeight}"
+                        Background="Transparent" CornerRadius="7" Margin="1" Padding="4,6">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <StackPanel>
+                        <Image Source="{Binding Icon}" Width="{Binding IconSize}" Height="{Binding IconSize}"
+                               RenderOptions.BitmapScalingMode="HighQuality" />
+                        <TextBlock Text="{Binding Name}" FontSize="11.5" Margin="0,6,0,0" MaxHeight="30"
+                                   TextWrapping="Wrap" TextAlignment="Center"
+                                   Foreground="{DynamicResource TextPrimaryBrush}" />
+                    </StackPanel>
+                </Border>
+                <Rectangle x:Name="InsertBar" Width="2" RadiusX="1" RadiusY="1" Margin="-1,6,-1,6"
+                           HorizontalAlignment="Left" IsHitTestVisible="False" Visibility="Collapsed"
+                           Fill="{DynamicResource AccentBrush}" />
+            </Grid>
             <DataTemplate.Triggers>
                 <DataTrigger Binding="{Binding IsSelected}" Value="True">
                     <Setter TargetName="Host" Property="Background" Value="{DynamicResource SelectedBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding InsertMark}" Value="True">
+                    <Setter TargetName="InsertBar" Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </DataTemplate.Triggers>
         </DataTemplate>
 
         <DataTemplate x:Key="ListItemTemplate">
-            <Border x:Name="Host" Background="Transparent" CornerRadius="6" Margin="0,1" Padding="6,5">
-                <Border.Style>
-                    <Style TargetType="Border">
-                        <Style.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
-                            </Trigger>
-                        </Style.Triggers>
-                    </Style>
-                </Border.Style>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <Image Source="{Binding Icon}" Width="18" Height="18" VerticalAlignment="Center"
-                           RenderOptions.BitmapScalingMode="HighQuality" />
-                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12.5" Margin="9,0,8,0"
-                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                               Foreground="{DynamicResource TextPrimaryBrush}" />
-                    <TextBlock Grid.Column="2" Text="{Binding Meta}" FontSize="11" VerticalAlignment="Center"
-                               Foreground="{DynamicResource TextSecondaryBrush}" />
-                </Grid>
-            </Border>
+            <Grid>
+                <Border x:Name="Host" Background="Transparent" CornerRadius="6" Margin="0,1" Padding="6,5">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Image Source="{Binding Icon}" Width="18" Height="18" VerticalAlignment="Center"
+                               RenderOptions.BitmapScalingMode="HighQuality" />
+                        <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12.5" Margin="9,0,8,0"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource TextPrimaryBrush}" />
+                        <TextBlock Grid.Column="2" Text="{Binding Meta}" FontSize="11" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextSecondaryBrush}" />
+                    </Grid>
+                </Border>
+                <Rectangle x:Name="InsertBar" Height="2" RadiusX="1" RadiusY="1" Margin="2,-1,2,-1"
+                           VerticalAlignment="Top" IsHitTestVisible="False" Visibility="Collapsed"
+                           Fill="{DynamicResource AccentBrush}" />
+            </Grid>
             <DataTemplate.Triggers>
                 <DataTrigger Binding="{Binding IsSelected}" Value="True">
                     <Setter TargetName="Host" Property="Background" Value="{DynamicResource SelectedBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding InsertMark}" Value="True">
+                    <Setter TargetName="InsertBar" Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </DataTemplate.Triggers>
         </DataTemplate>
@@ -176,7 +192,9 @@
         </Border>
 
         <!-- 缩放热区 -->
-        <Grid x:Name="ResizeLayer" Margin="-3">
+        <!-- Margin 用 0 而不是负数：盒子是分层窗口，阴影区（透明像素）收不到鼠标消息，
+             热区必须落在不透明的框体上才抓得住 -->
+        <Grid x:Name="ResizeLayer" Margin="0">
             <Border Tag="L" Width="6" HorizontalAlignment="Left" VerticalAlignment="Stretch"
                     Background="Transparent" Cursor="SizeWE" MouseLeftButtonDown="Resize_MouseLeftButtonDown" />
             <Border Tag="R" Width="6" HorizontalAlignment="Right" VerticalAlignment="Stretch"

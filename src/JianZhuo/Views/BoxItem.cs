@@ -11,6 +11,7 @@ public sealed class BoxItem : INotifyPropertyChanged
 {
     private BitmapSource? _icon;
     private bool _selected;
+    private bool _insertMark;
 
     public BoxItem(string path, int iconSize)
     {
@@ -20,6 +21,7 @@ public sealed class BoxItem : INotifyPropertyChanged
         IsDirectory = Directory.Exists(path);
         IconSize = iconSize;
         ItemWidth = iconSize + 26;
+        ItemHeight = iconSize + 48;
         Icon = IconCacheHolder.Placeholder(iconSize);
     }
 
@@ -58,6 +60,9 @@ public sealed class BoxItem : INotifyPropertyChanged
 
     public double ItemWidth { get; }
 
+    /// <summary>固定高度：所有条目一样高，缩小 / 放大才能按格子顿挫。</summary>
+    public double ItemHeight { get; }
+
     public string Meta => IsDirectory ? "文件夹" : BuildMeta();
 
     public BitmapSource? Icon
@@ -78,6 +83,20 @@ public sealed class BoxItem : INotifyPropertyChanged
             if (_selected != value)
             {
                 _selected = value;
+                Raise();
+            }
+        }
+    }
+
+    /// <summary>拖动其它条目经过时，在这一条前面显示插入标记。</summary>
+    public bool InsertMark
+    {
+        get => _insertMark;
+        set
+        {
+            if (_insertMark != value)
+            {
+                _insertMark = value;
                 Raise();
             }
         }

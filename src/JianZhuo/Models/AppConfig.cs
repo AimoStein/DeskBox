@@ -30,6 +30,12 @@ public sealed class BoxConfig
     public bool ListView { get; set; }
     public bool Visible { get; set; } = true;
 
+    /// <summary>
+    /// 用户拖动条目排出来的显示顺序（只存文件名）。
+    /// 新放进来的条目不在列表里，按默认规则排在后面。
+    /// </summary>
+    public List<string> ItemOrder { get; set; } = new();
+
     [JsonIgnore]
     public string EffectiveFolder => Folder;
 }
