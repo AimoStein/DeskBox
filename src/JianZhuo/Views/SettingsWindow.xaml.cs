@@ -81,6 +81,8 @@ public partial class SettingsWindow : Window
             ChkRestoreIcons.IsChecked = _config.RestoreIconsOnExit;
             ChkHidden.IsChecked = _config.ShowHiddenFiles;
             ChkShortcuts.IsChecked = _config.OrganizeShortcuts;
+            ChkAlign.IsChecked = _config.AutoAlignBoxes;
+            ChkAvoidOverlap.IsChecked = _config.AvoidBoxOverlap;
 
             PillLight.IsChecked = _config.Theme == ThemeMode.Light;
             PillDark.IsChecked = _config.Theme == ThemeMode.Dark;
@@ -149,6 +151,8 @@ public partial class SettingsWindow : Window
         _config.RestoreIconsOnExit = ChkRestoreIcons.IsChecked == true;
         _config.ShowHiddenFiles = ChkHidden.IsChecked == true;
         _config.OrganizeShortcuts = ChkShortcuts.IsChecked == true;
+        _config.AutoAlignBoxes = ChkAlign.IsChecked == true;
+        _config.AvoidBoxOverlap = ChkAvoidOverlap.IsChecked == true;
 
         if (ChkAutoStart.IsChecked == true != AutoStart.IsEnabled)
         {

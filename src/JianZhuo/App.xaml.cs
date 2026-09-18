@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
+using JianZhuo.Interop;
 using JianZhuo.Models;
 using JianZhuo.Services;
 using JianZhuo.Views;
@@ -18,6 +19,8 @@ public partial class App : Application
     private DesktopMouseWatcher? _mouseWatcher;
     private SettingsWindow? _settings;
     private DispatcherTimer? _saveTimer;
+    private NativeMethods.WinEventProc? _foregroundProc;
+    private IntPtr _foregroundHook;
     private int _lastIconSize;
     private bool _exiting;
 
@@ -103,6 +106,7 @@ public partial class App : Application
         }
 
         RestoreBoxes();
+        WatchForegroundChanges();
 
         if (_config.IconsHiddenByApp && _config.HideBoxesWithIcons)
         {
@@ -137,6 +141,88 @@ public partial class App : Application
 
     #region 盒子管理
 
+    /// <summary>
+    /// 盯着前台窗口的变化：按 Win+D 时桌面会成为前台窗口，盒子需要立刻把自己抬回桌面之上。
+    /// </summary>
+    private void WatchForegroundChanges()
+    {
+        _foregroundProc = (_, _, _, _, _, _, _) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            foreach (var box in _boxes)
+            {
+                box.KeepVisibleOnDesktop();
+            }
+
+            LogDesktopDiagnostics();
+        }));
+
+        _foregroundHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero,
+            _foregroundProc,
+            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT);
+
+        if (_foregroundHook == IntPtr.Zero)
+        {
+            Log.Warn("注册前台窗口监听失败，Win+D 后的恢复会退回定时器处理。");
+        }
+    }
+
+    /// <summary>
+    /// 只在"桌面跑到前台"或"某个盒子被桌面层盖住"时记一条现场信息，
+    /// 用来定位 Win+D（显示桌面）到底把盒子怎么了。
+    /// </summary>
+    private void LogDesktopDiagnostics()
+    {
+        try
+        {
+            var foregroundClass = NativeMethods.ClassNameOf(NativeMethods.GetForegroundWindow());
+
+            var pairs = _boxes
+                .Select(box => (Box: box, Hwnd: new System.Windows.Interop.WindowInteropHelper(box).Handle))
+                .Where(pair => pair.Hwnd != IntPtr.Zero && NativeMethods.IsCoveredByDesktop(pair.Hwnd))
+                .ToList();
+
+            if (pairs.Count == 0)
+            {
+                // 盒子都正常（挂在桌面宿主上的盒子根本不会出现在这里），不记录，免得刷日志
+                return;
+            }
+
+            var detail = string.Join("；", pairs.Select(pair =>
+            {
+                NativeMethods.GetWindowRect(pair.Hwnd, out var rect);
+                var center = new POINT(rect.Left + (rect.Right - rect.Left) / 2, rect.Top + (rect.Bottom - rect.Top) / 2);
+
+                return $"「{pair.Box.Config.Title}」visible={NativeMethods.IsWindowVisible(pair.Hwnd)} " +
+                       $"iconic={NativeMethods.IsIconic(pair.Hwnd)} " +
+                       $"rect={rect.Left},{rect.Top} {rect.Right - rect.Left}x{rect.Bottom - rect.Top} " +
+                       $"中心命中={NativeMethods.ClassNameOf(NativeMethods.WindowFromPoint(center))}";
+            }));
+
+            Log.Info($"桌面诊断：前台={foregroundClass} 桌面在前台={NativeMethods.DesktopIsForeground()} " +
+                     $"被桌面盖住的盒子={pairs.Count} {detail}");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("桌面诊断失败: " + ex.Message);
+        }
+    }
+
+    private void StopWatchingForeground()
+    {
+        if (_foregroundHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_foregroundHook);
+            _foregroundHook = IntPtr.Zero;
+        }
+
+        _foregroundProc = null;
+    }
+
     private void RestoreBoxes()
     {
         foreach (var boxConfig in _config.Boxes.ToList())
@@ -154,7 +240,7 @@ public partial class App : Application
 
     private BoxWindow CreateBoxWindow(BoxConfig boxConfig)
     {
-        var window = new BoxWindow(_config, boxConfig, _shell)
+        var window = new BoxWindow(_config, boxConfig, _shell, PeerRects)
         {
             ShowActivated = false,
         };
@@ -166,6 +252,24 @@ public partial class App : Application
         window.Show();
 
         return window;
+    }
+
+    /// <summary>其他盒子的实时矩形，供拖动对齐与落位避让使用。</summary>
+    private IReadOnlyList<BoxRect> PeerRects(string excludeId)
+    {
+        var list = new List<BoxRect>(_boxes.Count);
+
+        foreach (var window in _boxes)
+        {
+            if (window.Config.Id == excludeId || !window.IsVisible)
+            {
+                continue;
+            }
+
+            list.Add(window.ContentBox);
+        }
+
+        return list;
     }
 
     private void RemoveBox(BoxWindow window)
@@ -231,6 +335,15 @@ public partial class App : Application
         if (y + boxConfig.Height > area.Bottom)
         {
             y = Math.Max(area.Top + 20, area.Bottom - boxConfig.Height - 40);
+        }
+
+        if (_config.AvoidBoxOverlap)
+        {
+            // 新建的盒子不要压在已有盒子上
+            var desired = new BoxRect(boxConfig.Id, x, y, boxConfig.Width, boxConfig.Height);
+            var spot = BoxLayout.FindFreeSpot(desired, PeerRects(boxConfig.Id), area);
+            x = spot.X;
+            y = spot.Y;
         }
 
         boxConfig.X = x;
@@ -611,6 +724,7 @@ public partial class App : Application
 
         ConfigStore.Save(_config);
 
+        StopWatchingForeground();
         _mouseWatcher?.Dispose();
         _tray?.Dispose();
         _instance?.Dispose();
@@ -623,6 +737,7 @@ public partial class App : Application
         if (_ownsConfig && !_exiting)
         {
             ConfigStore.Save(_config);
+            StopWatchingForeground();
             _mouseWatcher?.Dispose();
             _tray?.Dispose();
             _instance?.Dispose();

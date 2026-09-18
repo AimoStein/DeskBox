@@ -15,16 +15,35 @@ public sealed class BoxItem : INotifyPropertyChanged
     public BoxItem(string path, int iconSize)
     {
         Path = path;
-        Name = System.IO.Path.GetFileName(path.TrimEnd(System.IO.Path.DirectorySeparatorChar));
-        if (string.IsNullOrEmpty(Name))
-        {
-            Name = path;
-        }
+        Name = DisplayName(path);
 
         IsDirectory = Directory.Exists(path);
         IconSize = iconSize;
         ItemWidth = iconSize + 26;
         Icon = IconCacheHolder.Placeholder(iconSize);
+    }
+
+    /// <summary>
+    /// 显示名：快捷方式（.lnk）和网址快捷方式（.url）隐藏扩展名，和资源管理器一致。
+    /// 其它文件保留扩展名，免得「合同.docx」变成「合同」后看不出类型。
+    /// </summary>
+    private static string DisplayName(string path)
+    {
+        var name = System.IO.Path.GetFileName(path.TrimEnd(System.IO.Path.DirectorySeparatorChar));
+        if (string.IsNullOrEmpty(name))
+        {
+            return path;
+        }
+
+        var extension = System.IO.Path.GetExtension(name);
+        if (!extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".url", StringComparison.OrdinalIgnoreCase))
+        {
+            return name;
+        }
+
+        var stem = name[..^extension.Length];
+        return stem.Length > 0 ? stem : name;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

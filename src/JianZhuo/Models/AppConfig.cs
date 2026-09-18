@@ -59,6 +59,12 @@ public sealed class AppConfig
     public bool ShowHiddenFiles { get; set; }
     public bool OrganizeShortcuts { get; set; }
 
+    /// <summary>拖动盒子时吸附对齐其他盒子。</summary>
+    public bool AutoAlignBoxes { get; set; } = true;
+
+    /// <summary>盒子落位时自动让开，避免和其他盒子重叠。</summary>
+    public bool AvoidBoxOverlap { get; set; } = true;
+
     /// <summary>由本程序隐藏了桌面图标（退出时据此还原）。</summary>
     public bool IconsHiddenByApp { get; set; }
 
@@ -79,6 +85,8 @@ public sealed class AppConfig
 /// <summary>配置读写：原子写入 + 备份回退，配置坏了也不会丢桌面布局。</summary>
 public static class ConfigStore
 {
+    private static string? _directory;
+
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -86,8 +94,43 @@ public static class ConfigStore
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static string Directory =>
+    /// <summary>
+    /// 配置目录：放在 exe 旁边（绿色便携，和程序一起走）。
+    /// exe 所在目录不可写时（例如被放进 Program Files）自动回退到 %APPDATA%\JianZhuo。
+    /// </summary>
+    public static string Directory => _directory ??= ResolveDirectory();
+
+    /// <summary>老版本用的位置：%APPDATA%\JianZhuo。第一次运行新版本会自动把配置迁移过来。</summary>
+    public static string LegacyDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JianZhuo");
+
+    private static string ResolveDirectory()
+    {
+        var besideExe = AppContext.BaseDirectory;
+        if (!string.IsNullOrEmpty(besideExe) && IsWritable(besideExe))
+        {
+            return besideExe;
+        }
+
+        return LegacyDirectory;
+    }
+
+    private static bool IsWritable(string directory)
+    {
+        try
+        {
+            System.IO.Directory.CreateDirectory(directory);
+
+            var probe = Path.Combine(directory, ".jianzhuo-write-test");
+            File.WriteAllText(probe, "ok");
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public static string FilePath => Path.Combine(Directory, "config.json");
     private static string BackupPath => Path.Combine(Directory, "config.backup.json");
@@ -105,6 +148,20 @@ public static class ConfigStore
         }
 
         var cfg = TryRead(FilePath) ?? TryRead(BackupPath);
+
+        if (cfg is null && !IsSameFolder(LegacyDirectory, Directory))
+        {
+            // 首次在 exe 旁边找配置：把老位置（%APPDATA%\JianZhuo）的那份搬过来
+            cfg = TryRead(Path.Combine(LegacyDirectory, "config.json"))
+                ?? TryRead(Path.Combine(LegacyDirectory, "config.backup.json"));
+
+            if (cfg is not null)
+            {
+                Log.Info($"配置已从 {LegacyDirectory} 迁移到 {Directory}");
+                Save(cfg);
+            }
+        }
+
         if (cfg is null)
         {
             if (File.Exists(FilePath) || File.Exists(BackupPath))
@@ -142,6 +199,21 @@ public static class ConfigStore
         {
             Log.Warn($"解析配置失败 {path}: {ex.Message}");
             return null;
+        }
+    }
+
+    private static bool IsSameFolder(string a, string b)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 

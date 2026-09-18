@@ -128,6 +128,40 @@
 
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
+                                <TextBlock Text="盒子排布" Style="{StaticResource CardTitle}" />
+
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="自动对齐其他盒子" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="拖动盒子时吸附到其他盒子的边和中线，并显示参考线"
+                                                   Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkAlign" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="避免盒子重叠" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="松手落位时如果压到别的盒子，自动让到最近的空位"
+                                                   Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkAvoidOverlap" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
                                 <TextBlock Text="外观" Style="{StaticResource CardTitle}" />
 
                                 <Grid Margin="0,0,0,16">

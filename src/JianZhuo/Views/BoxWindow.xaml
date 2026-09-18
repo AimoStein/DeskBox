@@ -154,7 +154,8 @@
 
                 <!-- 内容区 -->
                 <Grid Grid.Row="1" Margin="6,0,4,6">
-                    <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Auto"
+                    <!-- 隐藏右侧滚动条：滚轮照常滚动，但永远不显示侧滑块 -->
+                    <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Hidden"
                                   HorizontalScrollBarVisibility="Disabled" Padding="0,2,0,2">
                         <ItemsControl x:Name="ItemsHost" Background="Transparent" />
                     </ScrollViewer>

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,6 +22,7 @@ public partial class BoxWindow : Window
     private readonly AppConfig _config;
     private readonly BoxConfig _box;
     private readonly DesktopShell _shell;
+    private readonly Func<string, IReadOnlyList<BoxRect>>? _peers;
     private readonly ObservableCollection<BoxItem> _items = new();
 
     private FileSystemWatcher? _watcher;
@@ -36,11 +38,18 @@ public partial class BoxWindow : Window
     private bool? _appliedListView;
     private int _lastSelectedIndex = -1;
 
-    public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell)
+    private AlignGuideWindow? _guides;
+    private bool _moving;
+    private Point _moveStart;
+    private Rect _moveOrigin;
+    private bool _wantVisible = true;
+
+    public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell, Func<string, IReadOnlyList<BoxRect>>? peers = null)
     {
         _config = config;
         _box = box;
         _shell = shell;
+        _peers = peers;
 
         InitializeComponent();
 
@@ -69,6 +78,19 @@ public partial class BoxWindow : Window
 
     public BoxConfig Config => _box;
 
+    /// <summary>盒子内容区在桌面坐标系里的矩形（不含投影留白）。</summary>
+    public Rect ContentRect => new(
+        Left + ShadowPad,
+        Top + ShadowPad,
+        Math.Max(1, Width - ShadowPad * 2),
+        Math.Max(1, Height - ShadowPad * 2));
+
+    /// <summary>窗口在屏幕上的矩形（DIP）。</summary>
+    public Rect ScreenBounds => new(Left, Top, Width, Height);
+
+    public BoxRect ContentBox =>
+        new(_box.Id, ContentRect.X, ContentRect.Y, ContentRect.Width, ContentRect.Height);
+
     public string Folder
     {
         get
@@ -85,6 +107,8 @@ public partial class BoxWindow : Window
 
     public void SetVisible(bool visible)
     {
+        _wantVisible = visible;
+
         if (visible)
         {
             Show();
@@ -117,10 +141,8 @@ public partial class BoxWindow : Window
         };
         _zOrderTimer.Tick += (_, _) =>
         {
-            if (!IsActive && IsVisible && !_dragging)
-            {
-                PushDown();
-            }
+            RestoreIfShellHidTheBox();
+            KeepVisibleOnDesktop();
         };
         _zOrderTimer.Start();
 
@@ -147,7 +169,16 @@ public partial class BoxWindow : Window
 
     private void WireEvents()
     {
-        SourceInitialized += (_, _) => PushDown();
+        SourceInitialized += (_, _) =>
+        {
+            PushDown();
+
+            // 拦掉"最小化"：Win+D（显示桌面）会让系统最小化所有窗口，盒子不该跟着消失
+            if (PresentationSource.FromVisual(this) is HwndSource source)
+            {
+                source.AddHook(WndProc);
+            }
+        };
         Deactivated += (_, _) => PushDown();
 
         LocationChanged += (_, _) => SchedulePersist();
@@ -172,6 +203,123 @@ public partial class BoxWindow : Window
         ItemsHost.PreviewMouseMove += Items_PreviewMouseMove;
         ItemsHost.PreviewMouseRightButtonDown += Items_PreviewMouseRightButtonDown;
         ItemsHost.MouseDoubleClick += Items_MouseDoubleClick;
+    }
+
+    private const int WM_SYSCOMMAND = 0x0112;
+    private const int SC_MINIMIZE = 0xF020;
+    private const int WM_SIZE = 0x0005;
+    private const int SIZE_MINIMIZED = 1;
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_SYSCOMMAND && (wParam.ToInt64() & 0xFFF0) == SC_MINIMIZE)
+        {
+            // Win+D 走 SC_MINIMIZE 时直接拒掉
+            handled = true;
+            return IntPtr.Zero;
+        }
+
+        if (msg == WM_SIZE && wParam.ToInt64() == SIZE_MINIMIZED)
+        {
+            // 已经被最小化了（比如显示桌面的其他路径）：立刻还原，不要等定时器
+            Dispatcher.BeginInvoke(
+                new Action(() => RestoreIfShellHidTheBox()),
+                DispatcherPriority.Background);
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// 被系统藏起来（Win+D / 显示桌面）就自己回来。
+    /// 用户主动隐藏（双击桌面空白处隐藏图标）时不还原。
+    /// </summary>
+    internal void RestoreIfShellHidTheBox()
+    {
+        if (!_wantVisible || _dragging || _exiting)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        var minimized = WindowState != WindowState.Normal;
+        var hidden = handle != IntPtr.Zero && !NativeMethods.IsWindowVisible(handle);
+
+        if (!minimized && !hidden)
+        {
+            _restoreLogged = false; // 一切正常，下次被藏起来还能再记一条日志
+            return;
+        }
+
+        if (minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        if (hidden)
+        {
+            NativeMethods.ShowWindow(handle, NativeMethods.SW_SHOWNOACTIVATE);
+            NativeMethods.PushToBottom(handle);
+        }
+
+        if (!_restoreLogged)
+        {
+            _restoreLogged = true;
+            Log.Info($"盒子「{_box.Title}」被系统{(minimized ? "最小化" : "隐藏")}，已自动还原。");
+        }
+    }
+
+    private bool _restoreLogged;
+    private bool _raisedLogged;
+    private DateTime _lastDesktopPush = DateTime.MinValue;
+    private bool _exiting;
+
+    /// <summary>
+    /// 按 Win+D（显示桌面）时，系统会把桌面窗口提到盒子上面，盒子因此被盖住
+    /// （看起来就是"盒子连同图标一起消失了"）。盒子已经贴着 z 序底部、受 z 序带次限制，
+    /// 抬高自己没有用（实测抬不动），所以这里反过来把桌面窗口压回最底层；
+    /// 桌面退出前台、没有压住盒子时，再把盒子压回"桌面之上、普通窗口之下"。
+    /// </summary>
+    internal void KeepVisibleOnDesktop()
+    {
+        if (_exiting || !_wantVisible || _dragging)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (!NativeMethods.DesktopIsForeground() && !NativeMethods.IsCoveredByDesktop(handle))
+        {
+            _raisedLogged = false;
+
+            if (!IsActive && IsVisible)
+            {
+                PushDown();
+            }
+
+            return;
+        }
+
+        NativeMethods.PushDesktopToBottom();
+
+        // 桌面可能被系统反复提起，这里只在"隔了一阵又发生"时记一条，免得刷日志
+        if (!_raisedLogged || DateTime.UtcNow - _lastDesktopPush > TimeSpan.FromSeconds(30))
+        {
+            _raisedLogged = true;
+            _lastDesktopPush = DateTime.UtcNow;
+
+            NativeMethods.GetWindowRect(handle, out var rect);
+            var center = new POINT(rect.Left + (rect.Right - rect.Left) / 2, rect.Top + (rect.Bottom - rect.Top) / 2);
+
+            Log.Info(
+                $"桌面挡住盒子「{_box.Title}」（桌面在前台={NativeMethods.DesktopIsForeground()}，" +
+                $"中心命中={NativeMethods.ClassNameOf(NativeMethods.WindowFromPoint(center))}），已把桌面压回最底层。");
+        }
     }
 
     private void UpdateClip()
@@ -277,6 +425,26 @@ public partial class BoxWindow : Window
     }
 
     #endregion
+
+    /// <summary>窗口关闭时停掉所有还会碰这个窗口的定时器和监听。</summary>
+    private void StopShowing()
+    {
+        _exiting = true;
+        _zOrderTimer?.Stop();
+        _persistTimer?.Stop();
+        _reloadTimer?.Stop();
+        _watcher?.Dispose();
+        _watcher = null;
+
+        try
+        {
+            _guides?.Close();
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("关闭参考线失败: " + ex.Message);
+        }
+    }
 
     #region 内容加载
 
@@ -552,14 +720,7 @@ public partial class BoxWindow : Window
 
             if (!_box.Locked)
             {
-                try
-                {
-                    DragMove();
-                }
-                catch
-                {
-                    // 拖动过程中被取消，忽略
-                }
+                BeginMove(ItemsHost, e);
             }
 
             return;
@@ -789,14 +950,7 @@ public partial class BoxWindow : Window
             return;
         }
 
-        try
-        {
-            DragMove();
-        }
-        catch
-        {
-            // 忽略
-        }
+        BeginMove((IInputElement)sender, e);
     }
 
     private void BeginRename()
@@ -921,7 +1075,174 @@ public partial class BoxWindow : Window
 
     #endregion
 
+    #region 移动与对齐
+
+    /// <summary>
+    /// 自己实现拖动（而不是 DragMove），因为要在拖动过程中吸附对齐其他盒子。
+    /// </summary>
+    private void BeginMove(IInputElement capture, MouseButtonEventArgs e) =>
+        BeginMove(capture, ScreenPoint(e.GetPosition(this)));
+
+    /// <summary>开始拖动。capture 为 null 表示由自检直接驱动，不接管鼠标。</summary>
+    internal void BeginMove(IInputElement? capture, Point start)
+    {
+        if (_moving || _box.Locked)
+        {
+            return;
+        }
+
+        _moving = true;
+        _moveStart = start;
+        _moveOrigin = ScreenBounds;
+
+        if (capture is null)
+        {
+            return;
+        }
+
+        Mouse.Capture(capture);
+        MouseMove += Box_MoveMove;
+        MouseLeftButtonUp += Box_MoveUp;
+        LostMouseCapture += Box_LostMouseCapture;
+    }
+
+    private void Box_MoveMove(object sender, MouseEventArgs e)
+    {
+        if (!_moving)
+        {
+            return;
+        }
+
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            EndMove();
+            return;
+        }
+
+        MoveTo(ScreenPoint(e.GetPosition(this)));
+    }
+
+    /// <summary>把盒子拖到屏幕坐标（吸附对齐在这里生效）。</summary>
+    internal void MoveTo(Point screenPoint)
+    {
+        if (!_moving)
+        {
+            return;
+        }
+
+        var left = _moveOrigin.Left + (screenPoint.X - _moveStart.X);
+        var top = _moveOrigin.Top + (screenPoint.Y - _moveStart.Y);
+
+        var desired = new BoxRect(_box.Id, left + ShadowPad, top + ShadowPad, ContentRect.Width, ContentRect.Height);
+
+        if (_config.AutoAlignBoxes && _peers is not null)
+        {
+            var snap = BoxLayout.Snap(desired, _peers(_box.Id));
+            left += snap.X - desired.X;
+            top += snap.Y - desired.Y;
+            ShowGuides(snap);
+        }
+
+        _suppressPersist = true;
+        SetScreenBounds(left, top, Width, Height);
+    }
+
+    private void Box_MoveUp(object sender, MouseButtonEventArgs e) => EndMove();
+
+    private void Box_LostMouseCapture(object sender, MouseEventArgs e)
+    {
+        if (_moving)
+        {
+            EndMove();
+        }
+    }
+
+    /// <summary>结束拖动：按需避让重叠，然后保存位置。</summary>
+    internal void EndMove()
+    {
+        if (!_moving)
+        {
+            return;
+        }
+
+        _moving = false;
+        MouseMove -= Box_MoveMove;
+        MouseLeftButtonUp -= Box_MoveUp;
+        LostMouseCapture -= Box_LostMouseCapture;
+        Mouse.Capture(null);
+        HideGuides();
+
+        if (_config.AvoidBoxOverlap && _peers is not null)
+        {
+            var desired = ContentBox;
+            var others = _peers(_box.Id);
+
+            if (BoxLayout.AnyTooClose(desired, others))
+            {
+                // 只在盒子当前所在的范围内找空位，避免为了避让把它甩到别的显示器
+                var bounds = Rect.Union(SystemParameters.WorkArea, ScreenBounds);
+                var spot = BoxLayout.FindFreeSpot(desired, others, bounds);
+
+                SetScreenBounds(spot.X - ShadowPad, spot.Y - ShadowPad, Width, Height);
+            }
+        }
+
+        // 只是点了一下、位置没变就不用写配置
+        var moved = Math.Abs(Left - _moveOrigin.Left) > 0.01 || Math.Abs(Top - _moveOrigin.Top) > 0.01;
+
+        _suppressPersist = false;
+
+        if (moved)
+        {
+            PersistGeometry();
+        }
+
+    }
+
+    private void ShowGuides(SnapResult snap)
+    {
+        if (!snap.Snapped)
+        {
+            HideGuides();
+            return;
+        }
+
+        _guides ??= new AlignGuideWindow();
+
+        var guides = new List<AlignGuide>(2);
+
+        if (snap.Vertical is { } vertical)
+        {
+            guides.Add(vertical);
+        }
+
+        if (snap.Horizontal is { } horizontal)
+        {
+            guides.Add(horizontal);
+        }
+
+        _guides.ShowGuides(guides);
+    }
+
+    private void HideGuides() => _guides?.HideGuides();
+
+    #endregion
+
     #region 缩放与位置
+
+    /// <summary>按屏幕坐标摆放窗口（盒子是顶层窗口，屏幕坐标就是窗口坐标）。</summary>
+    private void SetScreenBounds(double x, double y, double width, double height)
+    {
+        var previous = _suppressPersist;
+        _suppressPersist = true;
+
+        Width = width;
+        Height = height;
+        Left = x;
+        Top = y;
+
+        _suppressPersist = previous;
+    }
 
     private void Resize_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -932,7 +1253,7 @@ public partial class BoxWindow : Window
 
         _resizeDirection = (sender as FrameworkElement)?.Tag as string ?? string.Empty;
         _resizeStart = ScreenPoint(e.GetPosition(this));
-        _resizeOrigin = new Rect(Left, Top, Width, Height);
+        _resizeOrigin = ScreenBounds;
 
         Mouse.Capture((IInputElement)sender);
         MouseMove += Resize_MouseMove;
@@ -981,11 +1302,8 @@ public partial class BoxWindow : Window
             height = Math.Max(minHeight, _resizeOrigin.Height + dy);
         }
 
-        Left = left;
-        Top = top;
-        Width = width;
-        Height = height;
         _suppressPersist = true;
+        SetScreenBounds(left, top, width, height);
     }
 
     private void Resize_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => EndResize();
@@ -1056,17 +1374,7 @@ public partial class BoxWindow : Window
 
     public void Dissolve()
     {
-        var count = _items.Count;
-        var message = count == 0
-            ? "解散这个盒子？"
-            : $"解散盒子并把里面的 {count} 项移回桌面？";
-
-        if (System.Windows.MessageBox.Show(message, "简桌", MessageBoxButton.OKCancel, MessageBoxImage.Question)
-            != MessageBoxResult.OK)
-        {
-            return;
-        }
-
+        // 直接解散：内容是移回桌面，不删东西，所以不再弹确认框
         MoveToDesktop(_items.Select(i => i.Path).ToList());
 
         try
@@ -1090,9 +1398,6 @@ public partial class BoxWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
-        _zOrderTimer?.Stop();
-        _persistTimer?.Stop();
-        _reloadTimer?.Stop();
-        _watcher?.Dispose();
+        StopShowing();
     }
 }

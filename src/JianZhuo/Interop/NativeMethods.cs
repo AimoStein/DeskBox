@@ -30,6 +30,15 @@ public struct SIZE
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public struct RECT
+{
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public struct MSLLHOOKSTRUCT
 {
     public POINT pt;
@@ -92,10 +101,22 @@ public static class NativeMethods
     public const int CMD_TOGGLE_DESKTOP_ICONS = 0x7402;
 
     public static readonly IntPtr HWND_BOTTOM = new(1);
+    public static readonly IntPtr HWND_TOP = IntPtr.Zero;
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOACTIVATE = 0x0010;
+
+    public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+
+    public const int SW_SHOWNOACTIVATE = 4;
+
+    public const int GWL_EXSTYLE = -20;
+    public const int WS_EX_TRANSPARENT = 0x00000020;
+    public const int WS_EX_TOOLWINDOW = 0x00000080;
+    public const int WS_EX_LAYERED = 0x00080000;
+    public const int WS_EX_NOACTIVATE = 0x08000000;
 
     public const uint FO_DELETE = 0x0003;
     public const ushort FOF_SILENT = 0x0004;
@@ -117,6 +138,12 @@ public static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
     [DllImport("user32.dll")]
     public static extern IntPtr WindowFromPoint(POINT point);
 
@@ -125,6 +152,45 @@ public static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    public const uint GA_ROOT = 2;
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    public delegate void WinEventProc(
+        IntPtr hWinEventHook,
+        uint eventType,
+        IntPtr hwnd,
+        int idObject,
+        int idChild,
+        uint dwEventThread,
+        uint dwmsEventTime);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetWinEventHook(
+        uint eventMin,
+        uint eventMax,
+        IntPtr hmodWinEventProc,
+        WinEventProc lpfnWinEventProc,
+        uint idProcess,
+        uint idThread,
+        uint dwFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
@@ -173,6 +239,106 @@ public static class NativeMethods
         {
             SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
+    }
+
+    /// <summary>
+    /// 把桌面窗口压回 z 序最底层。
+    ///
+    /// 按 Win+D（显示桌面）时系统会把桌面窗口提到盒子上面，盒子这时已经贴着 z 序底部、
+    /// 受 z 序带次限制，光把自己抬高没有用（实测抬不动）。把桌面压回底层才会重新露出盒子，
+    /// 而且盒子依旧在普通窗口之下。
+    /// </summary>
+    public static void PushDesktopToBottom()
+    {
+        var progman = FindWindow("Progman", null);
+        if (progman != IntPtr.Zero)
+        {
+            SetWindowPos(progman, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+
+        // 图标视图挂在某个 WorkerW 里时，被提上去的是那个 WorkerW
+        var defView = FindDesktopDefView();
+        var root = defView == IntPtr.Zero ? IntPtr.Zero : GetAncestor(defView, GA_ROOT);
+
+        if (root != IntPtr.Zero && root != progman)
+        {
+            SetWindowPos(root, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
+    /// <summary>
+    /// 把窗口抬到最前面但不激活。
+    /// 用在「显示桌面（Win+D）把桌面提到最前」的时候，让盒子重新盖在桌面之上。
+    /// </summary>
+    public static void RaiseToTop(IntPtr hwnd)
+    {
+        if (hwnd != IntPtr.Zero)
+        {
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
+    /// <summary>这个窗口是不是桌面本身（Progman / WorkerW / 图标视图）。</summary>
+    public static bool IsDesktopWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var cls = ClassNameOf(hwnd);
+        return cls.Equals("Progman", StringComparison.OrdinalIgnoreCase) ||
+               cls.Equals("WorkerW", StringComparison.OrdinalIgnoreCase) ||
+               cls.Equals("SHELLDLL_DefView", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>桌面当前是否在前台（按 Win+D 之后就是这样）。</summary>
+    public static bool DesktopIsForeground() => IsDesktopWindow(GetForegroundWindow());
+
+    /// <summary>
+    /// 窗口中心点当前是不是被桌面层盖住了（Win+D 之后就是这个状态）。
+    /// 被普通窗口挡住不算——那种情况本来就该让普通窗口在上面。
+    /// </summary>
+    public static bool IsCoveredByDesktop(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out var rect))
+        {
+            return false;
+        }
+
+        var x = rect.Left + (rect.Right - rect.Left) / 2;
+        var y = rect.Top + (rect.Bottom - rect.Top) / 2;
+
+        var hit = WindowFromPoint(new POINT(x, y));
+        if (hit == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var root = GetAncestor(hit, GA_ROOT);
+        if (root == hwnd || hit == hwnd)
+        {
+            return false; // 命中的就是自己（或自己的子窗口）
+        }
+
+        return IsDesktopWindow(root) || IsDesktopWindow(hit);
+    }
+
+    /// <summary>
+    /// 让窗口鼠标穿透、不抢焦点、不出现在 Alt+Tab —— 拖动盒子时的对齐参考线用这个。
+    /// </summary>
+    public static void MakeOverlay(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var style = GetWindowLong(hwnd, GWL_EXSTYLE);
+        SetWindowLong(
+            hwnd,
+            GWL_EXSTYLE,
+            style | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED);
     }
 
     /// <summary>定位承载桌面图标的 SHELLDLL_DefView。</summary>
