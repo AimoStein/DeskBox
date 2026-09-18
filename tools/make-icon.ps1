@@ -65,7 +65,7 @@ $sizes = @(256, 128, 64, 48, 32, 16)
 $images = @{}
 foreach ($s in $sizes) { $images[$s] = [byte[]](New-IconPng -Size $s) }
 
-$outPath = Join-Path $PSScriptRoot '..\src\JianZhuo\Assets\app.ico'
+$outPath = Join-Path $PSScriptRoot '..\src\DeskBox\Assets\app.ico'
 $outDir = Split-Path $outPath -Parent
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 
