@@ -2,7 +2,9 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
@@ -17,11 +19,18 @@
     <Company>DeskBox</Company>
     <Copyright>Copyright (c) 2026 Aimo (MIT License)</Copyright>
     <Description>Offline desktop organizer: partition boxes, one-click tidy up, icon hiding.</Description>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
     <InvariantGlobalization>false</InvariantGlobalization>
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
+    <PackageReference Include="Vortice.Direct3D9" Version="3.6.2" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.6.2" />
+    <EmbeddedResource Include="Rendering\LiquidGlass.hlsl" />
+  </ItemGroup>
 
   <!-- WinForms 会引入 System.Drawing / System.Windows.Forms 的隐式 using，和 WPF 类型冲突，这里去掉 -->
   <ItemGroup>

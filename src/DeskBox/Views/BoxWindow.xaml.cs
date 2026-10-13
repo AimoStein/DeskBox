@@ -64,6 +64,16 @@ public partial class BoxWindow : Window
 
         InitializeComponent();
 
+        GlassBackground.Config = config;
+        GlassBackground.AvailabilityChanged += available =>
+        {
+            if (available) Log.Info($"Liquid Glass: 盒子「{_box.Title}」实时玻璃已就绪。");
+            Backdrop.Opacity = available ? 1 : _config.BoxOpacity;
+            if (available) Frame.BorderBrush = new SolidColorBrush(Color.FromArgb(48, 255, 255, 255));
+            else Frame.SetResourceReference(Border.BorderBrushProperty, "BoxBorderBrush");
+            ApplyGlassForeground(available);
+        };
+
         ItemsHost.ItemsSource = _items;
         TitleText.Text = box.Title;
         Title = box.Title;
@@ -359,12 +369,22 @@ public partial class BoxWindow : Window
 
     private void ApplyVisualSettings()
     {
-        Backdrop.Opacity = _config.BoxOpacity;
+        GlassBackground.Refresh();
+        Backdrop.Opacity = GlassBackground.IsAvailable ? 1 : _config.BoxOpacity;
+        ApplyGlassForeground(GlassBackground.IsAvailable);
 
         var radius = new CornerRadius(_config.CornerRadius);
         Backdrop.CornerRadius = radius;
         Frame.CornerRadius = radius;
         UpdateClip();
+    }
+
+    private void ApplyGlassForeground(bool available)
+    {
+        if (available)
+            Resources["TextSecondaryBrush"] = new SolidColorBrush(ThemeManager.IsDark
+                ? Color.FromRgb(218, 222, 230) : Color.FromRgb(43, 49, 59));
+        else Resources.Remove("TextSecondaryBrush");
     }
 
     private void ApplyGeometry()
@@ -1691,6 +1711,7 @@ public partial class BoxWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        GlassBackground.Dispose();
         base.OnClosed(e);
         StopShowing();
     }

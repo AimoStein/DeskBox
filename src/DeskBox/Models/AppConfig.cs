@@ -57,6 +57,9 @@ public sealed class AppConfig
     public double BoxOpacity { get; set; } = 0.94;
     public double IconSize { get; set; } = 48;
     public double CornerRadius { get; set; } = 10;
+    public bool LiquidGlassEnabled { get; set; } = true;
+    public double GlassBlur { get; set; } = 5;
+    public double GlassRefraction { get; set; } = 12;
 
     public bool AutoStart { get; set; }
     public bool HideIconsOnDoubleClick { get; set; } = true;
@@ -243,6 +246,8 @@ public static class ConfigStore
         cfg.BoxOpacity = Math.Clamp(cfg.BoxOpacity, 0.35, 1.0);
         cfg.IconSize = Math.Clamp(cfg.IconSize, 32, 96);
         cfg.CornerRadius = Math.Clamp(cfg.CornerRadius, 0, 22);
+        cfg.GlassBlur = double.IsFinite(cfg.GlassBlur) ? Math.Clamp(cfg.GlassBlur, 0, 16) : 5;
+        cfg.GlassRefraction = double.IsFinite(cfg.GlassRefraction) ? Math.Clamp(cfg.GlassRefraction, 0, 28) : 12;
 
         foreach (var box in cfg.Boxes)
         {

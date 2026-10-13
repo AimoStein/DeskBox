@@ -183,6 +183,19 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="Liquid Glass" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="跟随 Wallpaper Engine 视频，呈现折射与光泽" Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkGlass" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+
+                                <Grid Margin="0,0,0,16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
                                     <TextBlock Text="主题" Style="{StaticResource RowLabel}" />
                                     <Border Grid.Column="1" Background="{DynamicResource InputBgBrush}"
                                             CornerRadius="8" Padding="3">
@@ -203,7 +216,7 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="52" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="盒子不透明度" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="背景浓度" Style="{StaticResource RowLabel}" />
                                     <Slider x:Name="SlOpacity" Grid.Column="1" Style="{StaticResource FlatSlider}"
                                             Minimum="35" Maximum="100" VerticalAlignment="Center"
                                             ValueChanged="Slider_ValueChanged" />
@@ -225,7 +238,7 @@
                                                HorizontalAlignment="Right" VerticalAlignment="Center" />
                                 </Grid>
 
-                                <Grid>
+                                <Grid Margin="0,0,0,16">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="150" />
                                         <ColumnDefinition Width="*" />
@@ -236,6 +249,31 @@
                                             Minimum="0" Maximum="22" VerticalAlignment="Center"
                                             ValueChanged="Slider_ValueChanged" />
                                     <TextBlock x:Name="LblRadius" Grid.Column="2" Style="{StaticResource Caption}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+
+                                <Grid Margin="0,0,0,16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="150" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="52" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="玻璃模糊" Style="{StaticResource RowLabel}" />
+                                    <Slider x:Name="SlGlassBlur" Grid.Column="1" Style="{StaticResource FlatSlider}"
+                                            Minimum="0" Maximum="16" VerticalAlignment="Center" ValueChanged="GlassSlider_ValueChanged" />
+                                    <TextBlock x:Name="LblGlassBlur" Grid.Column="2" Style="{StaticResource Caption}"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="150" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="52" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="玻璃折射" Style="{StaticResource RowLabel}" />
+                                    <Slider x:Name="SlGlassRefraction" Grid.Column="1" Style="{StaticResource FlatSlider}"
+                                            Minimum="0" Maximum="28" VerticalAlignment="Center" ValueChanged="GlassSlider_ValueChanged" />
+                                    <TextBlock x:Name="LblGlassRefraction" Grid.Column="2" Style="{StaticResource Caption}"
                                                HorizontalAlignment="Right" VerticalAlignment="Center" />
                                 </Grid>
                             </StackPanel>

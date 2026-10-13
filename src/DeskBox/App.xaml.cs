@@ -31,6 +31,20 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        var glassSmoke = e.Args.FirstOrDefault(a => a.StartsWith("--glass-smoketest=", StringComparison.OrdinalIgnoreCase));
+        if (glassSmoke is not null)
+        {
+            Rendering.GlassSmokeTest.Run(glassSmoke["--glass-smoketest=".Length..]);
+            return;
+        }
+
+        var glassProbe = e.Args.FirstOrDefault(a => a.StartsWith("--glass-probe=", StringComparison.OrdinalIgnoreCase));
+        if (glassProbe is not null || e.Args.Contains("--glass-preview"))
+        {
+            Rendering.GlassPreview.Run(glassProbe?["--glass-probe=".Length..]);
+            return;
+        }
+
         if (e.Args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
         {
             SelfTest.Run();
@@ -774,6 +788,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        Rendering.LiquidGlassEngine.Shutdown();
         if (_ownsConfig && !_exiting)
         {
             ConfigStore.Save(_config);

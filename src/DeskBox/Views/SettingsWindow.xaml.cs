@@ -83,6 +83,11 @@ public partial class SettingsWindow : Window
             ChkShortcuts.IsChecked = _config.OrganizeShortcuts;
             ChkAlign.IsChecked = _config.AutoAlignBoxes;
             ChkAvoidOverlap.IsChecked = _config.AvoidBoxOverlap;
+            ChkGlass.IsChecked = _config.LiquidGlassEnabled;
+            SlGlassBlur.Value = _config.GlassBlur;
+            SlGlassRefraction.Value = _config.GlassRefraction;
+            LblGlassBlur.Text = $"{_config.GlassBlur:0.0}";
+            LblGlassRefraction.Text = $"{_config.GlassRefraction:0.0}";
 
             PillLight.IsChecked = _config.Theme == ThemeMode.Light;
             PillDark.IsChecked = _config.Theme == ThemeMode.Dark;
@@ -162,6 +167,7 @@ public partial class SettingsWindow : Window
         _config.OrganizeShortcuts = ChkShortcuts.IsChecked == true;
         _config.AutoAlignBoxes = ChkAlign.IsChecked == true;
         _config.AvoidBoxOverlap = ChkAvoidOverlap.IsChecked == true;
+        _config.LiquidGlassEnabled = ChkGlass.IsChecked == true;
 
         if (ChkAutoStart.IsChecked == true != AutoStart.IsEnabled)
         {
@@ -212,6 +218,16 @@ public partial class SettingsWindow : Window
         _config.IconSize = Math.Round(SlIcon.Value);
         _config.CornerRadius = Math.Round(SlRadius.Value);
 
+        Applied?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void GlassSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_loading || LblGlassBlur is null || LblGlassRefraction is null) return;
+        _config.GlassBlur = SlGlassBlur.Value;
+        _config.GlassRefraction = SlGlassRefraction.Value;
+        LblGlassBlur.Text = $"{SlGlassBlur.Value:0.0}";
+        LblGlassRefraction.Text = $"{SlGlassRefraction.Value:0.0}";
         Applied?.Invoke(this, EventArgs.Empty);
     }
 

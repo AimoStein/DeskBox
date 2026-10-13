@@ -22,6 +22,7 @@
 | 图标隐藏 | 在桌面空白处**双击**即可隐藏全部桌面图标和盒子，再双击恢复 |
 | 桌面共存 | 按 **Win+D（显示桌面）**盒子不会消失；普通窗口依旧盖在盒子之上 |
 | 设置面板 | 一键整理 / 撤销整理 / 整理规则 / 主题外观 / 开机自启，都集中在这里 |
+| Liquid Glass | 实时采样 Wallpaper Engine 视频壁纸，显示玻璃模糊、圆角边缘折射与鼠标高光；设置 → 外观可开关并调节背景浓度、模糊和折射；图标与文字保持清晰 |
 | 程序外壳 | 托盘图标、设置面板、开机自启 |
 
 ## 使用
@@ -74,14 +75,13 @@
 
 **直接拿来用**：Releases 里的最新版本附带了编译好的单文件版 `DeskBox.exe`（Windows x64，自带 .NET 运行时，双击即可）。
 
-**自己编译**：需要 .NET 8 SDK（Windows）。工程不引用任何 NuGet 包，离线也能编译。
-已验证：干净克隆 → `dotnet build -c Release` 一次通过，0 警告 0 错误，产物自检全过。
+**自己编译**：需要 .NET 8 或更高版本 SDK（Windows）。第一次还原需要下载 Windows SDK 的 .NET 投影和 Vortice Direct3D 依赖；依赖缓存后可以离线构建。应用运行时不联网。
 
 ```powershell
 git clone https://github.com/AimoStein/DeskBox.git
 cd DeskBox/src/DeskBox
 
-# 1) 普通编译 —— 产物 bin\Release\net8.0-windows\DeskBox.exe（约 160 KB）
+# 1) 普通编译 —— 产物 bin\Release\net8.0-windows10.0.22621.0\DeskBox.exe
 #    体积小，但目标机器需要装 .NET 8 桌面运行时
 dotnet build -c Release
 
@@ -122,6 +122,7 @@ DeskBox.exe --startup             开机自启时使用（不弹窗）
 ## 实现要点
 
 - WPF（.NET 8），每个盒子是一个无边框分层窗口，被压到 z 序最底层，因此常驻桌面之上、始终位于普通窗口之下，也不需要注入 explorer。
+- 玻璃背景采用 Windows Graphics Capture + Direct3D 11 着色器，通过 D3D9Ex 共享表面接入 WPF；同一桌面宿主只捕获一次，各盒子复用实时帧和半分辨率高斯模糊。背景不在 CPU 上逐帧截屏，全部盒子隐藏时释放捕获。Wallpaper Engine 的视频子窗口无法直接捕获时使用其桌面宿主，因此背景可能包括原有桌面图标，盒子自身不属于这个宿主，不会形成递归画面。
 - 按 Win+D 时系统会把桌面窗口提到盒子上面。盒子已经贴着 z 序底部、受 z 序带次限制，抬高自己没用（`SetWindowPos(HWND_TOP)` 实测抬不动），所以反过来把桌面窗口压回 z 序底层；桌面被反复提起时会自动再压一次，并拦掉 `SC_MINIMIZE`、在被最小化时自动还原。日志按 30 秒节流，不会刷屏。
 - 图标用 `IShellItemImageFactory` 取高清图标；Shell 返回 `E_PENDING` 时会自动重试。
 - 桌面图标显隐走资源管理器自己的菜单命令（`WM_COMMAND 0x7402`）发给 `SHELLDLL_DefView`，不改坏系统设置。
@@ -129,9 +130,22 @@ DeskBox.exe --startup             开机自启时使用（不弹窗）
 
 ## 已知限制
 
+- Liquid Glass 当前针对 Wallpaper Engine 视频壁纸，在本机 Windows 11 上验证；需要 Windows 10 2004 或更高版本与支持 Direct3D 11 的显卡。捕获不可用时回退普通背景。其他壁纸类型、HDR、多显卡和混合 DPI 多屏尚未完整验证。渲染错误后可关闭再开启 Liquid Glass 重建服务。
 - 不支持多显示器之间按显示器分别记忆（位置按虚拟桌面坐标保存，改变显示器布局后需要重新摆一下）。
 - 桌面图标隐藏用的是系统开关，属于全局状态：退出时默认会恢复（可在设置里关掉）。
 - 没有磁盘映射和全盘搜索，这两个功能按需求排除在外。
+
+### 玻璃预览与验证
+
+以下模式独立运行，不读取或修改正式配置，也不移动真实桌面文件：
+
+```text
+DeskBox.exe --glass-preview
+DeskBox.exe --glass-probe=C:\Temp\DeskBoxGlassProbe
+DeskBox.exe --glass-smoketest=C:\Temp\DeskBoxGlassSmoke
+```
+
+预览按 Esc 关闭。Probe 在八秒内记录实际捕获/渲染帧数并导出两次画面，随后退出；这些画面只写到指定本地目录。Smoke 使用该目录内的测试文件验证两盒子共享捕获、移动、缩放、收起、深浅主题、隐藏恢复、开关和资源释放，十秒后退出。需要 Wallpaper Engine 正在播放视频。
 
 ## 许可
 
