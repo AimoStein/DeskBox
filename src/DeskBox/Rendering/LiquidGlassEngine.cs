@@ -40,7 +40,7 @@ internal sealed class LiquidGlassEngine : IDisposable
     internal IReadOnlyList<GlassSurface> Surfaces => _surfaces;
     internal double LastTickMilliseconds { get; private set; }
     internal long Ticks { get; private set; }
-    internal string SurfaceStatus => string.Join("; ", _surfaces.Select(s => $"draws={s.Draws}, front={s.Image.IsFrontBufferAvailable}, bounds={s.GetBounds()}"));
+    internal string SurfaceStatus => string.Join("; ", _surfaces.Select(s => $"draws={s.Draws}, lockMisses={s.LockMisses}, front={s.Image.IsFrontBufferAvailable}, bounds={s.GetBounds()}"));
     internal void SaveSurface(string path) => _surfaces.FirstOrDefault()?.SaveFrame(path);
 
     internal void SaveDiagnostics(string output)
@@ -198,6 +198,13 @@ internal sealed class LiquidGlassEngine : IDisposable
             _blurBuffers[capture] = blur;
         }
         if (blur.Frame == capture.Frames && blur.Radius == radius) return;
+        RenderBlur(source, blur, radius);
+        blur.Frame = capture.Frames; blur.Radius = radius;
+    }
+
+    private void RenderBlur(ID3D11Texture2D source, BlurBuffer blur, float radius)
+    {
+        var size = source.Description;
         var parameters = new GlassParameters
         {
             Material = new System.Numerics.Vector4(radius, 0, 0, 0),
@@ -207,7 +214,28 @@ internal sealed class LiquidGlassEngine : IDisposable
         parameters.Material.X = radius / 2;
         parameters.TextureSize = new System.Numerics.Vector4(blur.Width, blur.Height, 0, 1);
         DrawPass(blur.Horizontal, null, blur.OutputTarget, (int)blur.Width, (int)blur.Height, parameters, _blurPixel);
-        blur.Frame = capture.Frames; blur.Radius = radius;
+    }
+
+    // The appearance test uses the production shader passes on a fixed texture so
+    // wallpaper motion cannot masquerade as a response to a slider.
+    internal System.Windows.Media.Imaging.BitmapSource RenderSample(ID3D11Texture2D source,
+        int width, int height, GlassParameters parameters)
+    {
+        using var blur = new BlurBuffer(Device, source.Description.Width, source.Description.Height);
+        RenderBlur(source, blur, parameters.Material.X);
+        using var target = Device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width, Height = (uint)height, MipLevels = 1, ArraySize = 1,
+            Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+            SampleDescription = new Vortice.DXGI.SampleDescription(1, 0),
+            BindFlags = BindFlags.RenderTarget
+        });
+        using var view = Device.CreateRenderTargetView(target);
+        parameters.Region = new System.Numerics.Vector4(0, 0, 1, 1);
+        parameters.Shape.X = width; parameters.Shape.Y = height;
+        parameters.TextureSize = new System.Numerics.Vector4(source.Description.Width, source.Description.Height, 0, 0);
+        DrawPass(source, blur.Output, view, width, height, parameters, _pixel);
+        return GlassPreview.CopyTexture(this, target);
     }
 
     internal void Draw(WallpaperCapture capture, ID3D11RenderTargetView target, int width, int height, GlassParameters parameters)

@@ -21,7 +21,7 @@ public partial class App : Application
     private DispatcherTimer? _saveTimer;
     private NativeMethods.WinEventProc? _foregroundProc;
     private IntPtr _foregroundHook;
-    private int _lastIconSize;
+    private bool _lastShowHiddenFiles;
     private bool _exiting;
 
     /// <summary>只有真正持有单实例锁的进程才有权写配置，否则第二次启动会把配置覆盖成默认值。</summary>
@@ -72,7 +72,7 @@ public partial class App : Application
         };
 
         _config = ConfigStore.Load();
-        _lastIconSize = (int)_config.IconSize;
+        _lastShowHiddenFiles = _config.ShowHiddenFiles;
         ThemeManager.Apply(_config.Theme);
 
         _shell = new DesktopShell();
@@ -838,12 +838,12 @@ public partial class App : Application
             _mouseWatcher.Enabled = _config.HideIconsOnDoubleClick;
         }
 
-        var iconSizeChanged = (int)_config.IconSize != _lastIconSize;
-        _lastIconSize = (int)_config.IconSize;
+        var hiddenFilesChanged = _config.ShowHiddenFiles != _lastShowHiddenFiles;
+        _lastShowHiddenFiles = _config.ShowHiddenFiles;
 
         foreach (var box in _boxes)
         {
-            box.RefreshFromConfig(iconSizeChanged);
+            box.RefreshFromConfig(hiddenFilesChanged);
         }
     }
 

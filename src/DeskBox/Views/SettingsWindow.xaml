@@ -218,7 +218,7 @@
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Text="背景浓度" Style="{StaticResource RowLabel}" />
                                     <Slider x:Name="SlOpacity" Grid.Column="1" Style="{StaticResource FlatSlider}"
-                                            Minimum="35" Maximum="100" VerticalAlignment="Center"
+                                            Minimum="0" Maximum="100" VerticalAlignment="Center"
                                             ValueChanged="Slider_ValueChanged" />
                                     <TextBlock x:Name="LblOpacity" Grid.Column="2" Style="{StaticResource Caption}"
                                                HorizontalAlignment="Right" VerticalAlignment="Center" />
@@ -246,7 +246,7 @@
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Text="圆角" Style="{StaticResource RowLabel}" />
                                     <Slider x:Name="SlRadius" Grid.Column="1" Style="{StaticResource FlatSlider}"
-                                            Minimum="0" Maximum="22" VerticalAlignment="Center"
+                                            Minimum="10" Maximum="100" VerticalAlignment="Center"
                                             ValueChanged="Slider_ValueChanged" />
                                     <TextBlock x:Name="LblRadius" Grid.Column="2" Style="{StaticResource Caption}"
                                                HorizontalAlignment="Right" VerticalAlignment="Center" />
@@ -272,7 +272,7 @@
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Text="玻璃折射" Style="{StaticResource RowLabel}" />
                                     <Slider x:Name="SlGlassRefraction" Grid.Column="1" Style="{StaticResource FlatSlider}"
-                                            Minimum="0" Maximum="28" VerticalAlignment="Center" ValueChanged="GlassSlider_ValueChanged" />
+                                            Minimum="0" Maximum="80" VerticalAlignment="Center" ValueChanged="GlassSlider_ValueChanged" />
                                     <TextBlock x:Name="LblGlassRefraction" Grid.Column="2" Style="{StaticResource Caption}"
                                                HorizontalAlignment="Right" VerticalAlignment="Center" />
                                 </Grid>

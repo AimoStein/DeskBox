@@ -21,8 +21,9 @@ Vertex VS(uint id : SV_VertexID)
 
 float RoundedDistance(float2 p)
 {
-    float2 q = abs(p) - (Shape.xy * 0.5 - Shape.z);
-    return length(max(q, 0)) + min(max(q.x, q.y), 0) - Shape.z;
+    float radius = clamp(Shape.z, 0, min(Shape.x, Shape.y) * 0.5);
+    float2 q = abs(p) - (Shape.xy * 0.5 - radius);
+    return length(max(q, 0)) + min(max(q.x, q.y), 0) - radius;
 }
 
 float4 BlurPS(Vertex input) : SV_TARGET
@@ -54,11 +55,8 @@ float4 PS(Vertex input) : SV_TARGET
         Backdrop.Sample(LinearClamp, uv).rgb, edge * edge * 0.35);
     if (Material.x < 0.001) color = Backdrop.Sample(LinearClamp, uv).rgb;
     float3 tint = lerp(float3(0.95, 0.97, 1), float3(0.065, 0.075, 0.095), Material.w);
-    // Adapt the material to video brightness so file names stay readable on changing frames.
-    float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
-    float lightTint = saturate((0.55 - luminance) / max(0.97 - luminance, 0.01));
-    float darkTint = saturate((luminance - 0.28) / max(luminance - 0.075, 0.01));
-    color = lerp(color, tint, max(Material.z, lerp(lightTint, darkTint, Material.w)));
+    // Zero concentration leaves wallpaper colors intact; 100% fully applies the theme tint.
+    color = lerp(color, tint, saturate(Material.z));
     float light = saturate(dot(normal, normalize(float2(-0.55, -0.83))));
     float rim = exp(-abs(d + 1.25) * 1.3);
     color += rim * (0.1 + 0.36 * light);

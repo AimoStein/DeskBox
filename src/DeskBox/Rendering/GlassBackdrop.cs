@@ -12,6 +12,7 @@ namespace DeskBox.Rendering;
 /// <summary>Only the background is rendered with glass; WPF content stays crisp.</summary>
 public sealed class GlassBackdrop : Grid, IDisposable
 {
+    internal const double RefractionBandWidth = 8;
     private readonly Image _image = new() { Stretch = Stretch.Fill };
     private GlassSurface? _surface;
     private Window? _window;
@@ -67,9 +68,9 @@ public sealed class GlassBackdrop : Grid, IDisposable
         _hover += ((_window?.IsMouseOver == true ? 1f : 0f) - _hover) * 0.18f;
         return new GlassParameters
         {
-            Shape = new Vector4(0, 0, (float)(config.CornerRadius * dpi), (float)(20 * dpi)),
+            Shape = new Vector4(0, 0, (float)(config.CornerRadius * dpi), (float)(RefractionBandWidth * dpi)),
             Material = new Vector4((float)(config.GlassBlur * dpi), (float)(config.GlassRefraction * dpi),
-                (float)(0.12 + config.BoxOpacity * 0.27), ThemeManager.IsDark ? 1 : 0),
+                (float)config.BoxOpacity, ThemeManager.IsDark ? 1 : 0),
             Pointer = new Vector4((float)(mouse.X / Math.Max(ActualWidth, 1)),
                 (float)(mouse.Y / Math.Max(ActualHeight, 1)), _hover, 0)
         };

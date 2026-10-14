@@ -19,9 +19,7 @@ public sealed class BoxItem : INotifyPropertyChanged
         Name = DisplayName(path);
 
         IsDirectory = Directory.Exists(path);
-        IconSize = iconSize;
-        ItemWidth = iconSize + 26;
-        ItemHeight = iconSize + 48;
+        ApplyIconSize(iconSize);
         Icon = IconCacheHolder.Placeholder(iconSize);
     }
 
@@ -56,12 +54,24 @@ public sealed class BoxItem : INotifyPropertyChanged
 
     public bool IsDirectory { get; }
 
-    public int IconSize { get; }
+    public int IconSize { get; private set; }
 
-    public double ItemWidth { get; }
+    public double ItemWidth { get; private set; }
 
     /// <summary>固定高度：所有条目一样高，缩小 / 放大才能按格子顿挫。</summary>
-    public double ItemHeight { get; }
+    public double ItemHeight { get; private set; }
+
+    internal bool ApplyIconSize(int size)
+    {
+        if (size == IconSize) return false;
+        IconSize = size;
+        ItemWidth = size + 26;
+        ItemHeight = size + 48;
+        Raise(nameof(IconSize));
+        Raise(nameof(ItemWidth));
+        Raise(nameof(ItemHeight));
+        return true;
+    }
 
     public string Meta => IsDirectory ? "文件夹" : BuildMeta();
 

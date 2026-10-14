@@ -18,6 +18,9 @@ public partial class BoxWindow : Window
 {
     public const double ShadowPad = 12;
     private const double TitleHeight = 34;
+    internal const double ContentHorizontalChrome = 18; // border + symmetric margin + scroll padding
+    internal const double ContentVerticalChrome = 46;   // border + title + bottom margin + scroll padding
+    private bool _fittingHeight;
 
     /// <summary>盒内拖动时捎带的来源标记，用来区分「盒内排序」和「跨盒子移动」。</summary>
     internal const string BoxDragFormat = "DeskBox.BoxItems";
@@ -47,13 +50,8 @@ public partial class BoxWindow : Window
     private Rect _moveOrigin;
     private bool _wantVisible = true;
 
-    // 缩放顿挫：按下时量一次格子 / 留白，整段拖动都用这一份，避免越拖越漂
+    // 按下时固定列宽，整段拖动使用相同列宽。
     private double _resizeCellWidth;
-    private double _resizeCellHeight;
-    private double _resizeChromeWidth;
-    private double _resizeChromeHeight;
-    private int _resizeColumns;
-    private int _resizeRows;
 
     public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell, Func<string, IReadOnlyList<BoxRect>>? peers = null)
     {
@@ -157,6 +155,12 @@ public partial class BoxWindow : Window
         {
             ReloadItems();
         }
+        else
+        {
+            foreach (var item in _items)
+                if (item.ApplyIconSize((int)_config.IconSize)) _ = LoadIconAsync(item);
+        }
+        FitContentHeight();
     }
 
     /// <summary>把盒子挪到指定的桌面坐标（一键整理盒子时用），同样不会跑出屏幕。</summary>
@@ -219,10 +223,12 @@ public partial class BoxWindow : Window
             }
         };
         Deactivated += (_, _) => PushDown();
+        Loaded += (_, _) => { FitContentHeight(); UpdateClip(); };
 
         LocationChanged += (_, _) => SchedulePersist();
-        SizeChanged += (_, _) =>
+        SizeChanged += (_, e) =>
         {
+            if (e.WidthChanged) FitContentHeight();
             UpdateClip();
             SchedulePersist();
         };
@@ -365,6 +371,7 @@ public partial class BoxWindow : Window
     {
         var radius = _config.CornerRadius;
         Frame.Clip = new RectangleGeometry(new Rect(0, 0, Frame.ActualWidth, Frame.ActualHeight), radius, radius);
+        GlassBackground.Clip = new RectangleGeometry(new Rect(0, 0, GlassBackground.ActualWidth, GlassBackground.ActualHeight), radius, radius);
     }
 
     private void ApplyVisualSettings()
@@ -440,6 +447,7 @@ public partial class BoxWindow : Window
             ViewIcon.Fill = (Brush)FindResource("TextSecondaryBrush");
             ViewIcon.Data = Geometry.Parse("M0,0 H4.6 V4.6 H0 Z M7.2,0 H11.8 V4.6 H7.2 Z M0,7.2 H4.6 V11.8 H0 Z M7.2,7.2 H11.8 V11.8 H7.2 Z");
         }
+        FitContentHeight();
     }
 
     private void ApplyLockState()
@@ -601,15 +609,21 @@ public partial class BoxWindow : Window
         }
 
         EmptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        FitContentHeight();
     }
 
     private static async Task LoadIconAsync(BoxItem item)
     {
+        var requestedSize = item.IconSize;
+        // Let rapid slider updates settle before asking the shell for another bitmap.
+        await Task.Delay(120);
+        if (item.IconSize != requestedSize) return;
         for (var attempt = 0; attempt < 2; attempt++)
         {
             try
             {
-                var icon = await IconCache.GetAsync(item.Path, item.IconSize);
+                var icon = await IconCache.GetAsync(item.Path, requestedSize);
+                if (item.IconSize != requestedSize) return;
                 if (icon is not null)
                 {
                     if (!ReferenceEquals(item.Icon, icon))
@@ -1273,10 +1287,11 @@ public partial class BoxWindow : Window
         }
 
         _suppressPersist = true;
-        Height = (_box.Collapsed ? TitleHeight + 8 : Math.Max(150, _box.ExpandedHeight)) + ShadowPad * 2;
+        Height = (_box.Collapsed ? TitleHeight + 8 : _box.ExpandedHeight) + ShadowPad * 2;
         _suppressPersist = false;
 
         ApplyCollapseState();
+        FitContentHeight();
         PersistGeometry();
         Changed?.Invoke(this, EventArgs.Empty);
     }
@@ -1285,6 +1300,7 @@ public partial class BoxWindow : Window
     {
         _box.ListView = !_box.ListView;
         ApplyViewMode();
+        FitContentHeight();
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
@@ -1487,6 +1503,35 @@ public partial class BoxWindow : Window
 
     #region 缩放与位置
 
+    /// <summary>Only width is manual; row count determines the expanded height.</summary>
+    internal void FitContentHeight()
+    {
+        if (_fittingHeight || !double.IsFinite(Width)) return;
+        var size = (int)_config.IconSize;
+        var columns = _box.ListView ? 1 : CellGrid.Count(Width - ShadowPad * 2 - ContentHorizontalChrome, size + 28);
+        var rows = CellGrid.CellsFor(_items.Count, columns);
+        var rowHeight = _box.ListView ? size + 12 : size + 50;
+        var desired = Math.Clamp(ContentVerticalChrome + rows * rowHeight, 120,
+            Math.Max(120, DesktopBounds.Height - BoxLayout.SnapGap * 2));
+        var changed = Math.Abs(_box.Height - desired) > 0.01 || Math.Abs(_box.ExpandedHeight - desired) > 0.01;
+        _box.Height = _box.ExpandedHeight = desired;
+        var actualHeight = (_box.Collapsed ? TitleHeight + 8 : desired) + ShadowPad * 2;
+        var previous = _suppressPersist;
+        _fittingHeight = true; _suppressPersist = true;
+        try
+        {
+            Height = actualHeight;
+            if (IsLoaded && _resizeDirection.Length == 0)
+            {
+                var bounded = BoxLayout.ClampToArea(ContentBox, DesktopBounds);
+                Left = bounded.X - ShadowPad; Top = bounded.Y - ShadowPad;
+                _box.X = bounded.X; _box.Y = bounded.Y;
+            }
+        }
+        finally { _suppressPersist = previous; _fittingHeight = false; }
+        if (changed && !previous) Changed?.Invoke(this, EventArgs.Empty);
+    }
+
     /// <summary>按屏幕坐标摆放窗口（盒子是顶层窗口，屏幕坐标就是窗口坐标）。</summary>
     private void SetScreenBounds(double x, double y, double width, double height)
     {
@@ -1528,10 +1573,7 @@ public partial class BoxWindow : Window
 
         var current = ScreenPoint(e.GetPosition(this));
         var dx = current.X - _resizeStart.X;
-        var dy = current.Y - _resizeStart.Y;
-
-        const double minWidth = 200;
-        const double minHeight = 120;
+        const double minWidth = 200 + ShadowPad * 2;
 
         var left = _resizeOrigin.Left;
         var top = _resizeOrigin.Top;
@@ -1549,65 +1591,26 @@ public partial class BoxWindow : Window
             width = Math.Max(minWidth, _resizeOrigin.Width + dx);
         }
 
-        if (_resizeDirection.Contains('T'))
+        if (!_box.ListView && _resizeCellWidth > 1)
         {
-            var newTop = Math.Min(_resizeOrigin.Top + dy, _resizeOrigin.Bottom - minHeight);
-            height = _resizeOrigin.Bottom - newTop;
-            top = newTop;
-        }
-        else if (_resizeDirection.Contains('B'))
-        {
-            height = Math.Max(minHeight, _resizeOrigin.Height + dy);
-        }
-
-        // 按图标格子顿挫：宽度整列跳，高度整行跳；加宽时高度自动收成刚好装下的行数
-        if (!_box.Collapsed && _resizeCellWidth > 1 && _resizeCellHeight > 1)
-        {
-            var snapped = CellGrid.SnapResize(
-                _resizeOrigin, left, top, width, height, _resizeDirection,
-                _resizeCellWidth, _resizeCellHeight, _resizeChromeWidth, _resizeChromeHeight,
-                _resizeColumns, _resizeRows, Math.Max(1, _items.Count),
-                snapColumns: !_box.ListView);
-
-            left = snapped.X;
-            top = snapped.Y;
-            width = snapped.Width;
-            height = snapped.Height;
+            var chrome = ShadowPad * 2 + ContentHorizontalChrome;
+            var minimumColumns = (int)Math.Ceiling((minWidth - chrome) / _resizeCellWidth);
+            var columns = Math.Max(minimumColumns, (int)Math.Round((width - chrome) / _resizeCellWidth));
+            width = chrome + columns * _resizeCellWidth;
+            if (_resizeDirection.Contains('L')) left = _resizeOrigin.Right - width;
         }
 
         _suppressPersist = true;
         SetScreenBounds(left, top, width, height);
+        FitContentHeight();
     }
 
     /// <summary>
-    /// 按下缩放条时量一次：一个条目占的格子、以及标题栏 / 边框那些不属于格子的留白。
-    /// 之后整段拖动都用这一份，否则每动一下都用新尺寸重算，框会越拖越漂。
+    /// 固定当前图标列宽，空盒子也按同样的列宽缩放。
     /// </summary>
     private void MeasureResizeGrid()
     {
-        _resizeCellWidth = 0;
-        _resizeCellHeight = 0;
-        _resizeChromeWidth = 0;
-        _resizeChromeHeight = 0;
-        _resizeColumns = 0;
-        _resizeRows = 0;
-
-        if (ItemsHost.ItemContainerGenerator.ContainerFromIndex(0) is not FrameworkElement container ||
-            container.ActualWidth <= 4 ||
-            container.ActualHeight <= 4 ||
-            _items.Count == 0)
-        {
-            return;
-        }
-
-        _resizeCellWidth = container.ActualWidth;
-        _resizeCellHeight = container.ActualHeight;
-        _resizeColumns = CellGrid.Count(ItemsHost.ActualWidth, _resizeCellWidth);
-        _resizeRows = CellGrid.CellsFor(_items.Count, _resizeColumns);
-        _resizeChromeWidth = _resizeOrigin.Width - _resizeColumns * _resizeCellWidth;
-        _resizeChromeHeight = Scroller.ActualHeight > 8
-            ? _resizeOrigin.Height - (Scroller.ActualHeight - 4)
-            : _resizeOrigin.Height - _resizeRows * _resizeCellHeight;
+        _resizeCellWidth = (int)_config.IconSize + 28;
     }
 
     private void Resize_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => EndResize();

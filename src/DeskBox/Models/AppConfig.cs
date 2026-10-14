@@ -54,12 +54,12 @@ public sealed class AppConfig
     public string BoxRoot { get; set; } = "";
 
     public ThemeMode Theme { get; set; } = ThemeMode.System;
-    public double BoxOpacity { get; set; } = 0.94;
-    public double IconSize { get; set; } = 48;
-    public double CornerRadius { get; set; } = 10;
+    public double BoxOpacity { get; set; } = 0.35;
+    public double IconSize { get; set; } = 37;
+    public double CornerRadius { get; set; } = 22;
     public bool LiquidGlassEnabled { get; set; } = true;
-    public double GlassBlur { get; set; } = 5;
-    public double GlassRefraction { get; set; } = 12;
+    public double GlassBlur { get; set; } = 0;
+    public double GlassRefraction { get; set; } = 28;
 
     public bool AutoStart { get; set; }
     public bool HideIconsOnDoubleClick { get; set; } = true;
@@ -243,11 +243,11 @@ public static class ConfigStore
             cfg.BoxRoot = AppConfig.DefaultBoxRoot();
         }
 
-        cfg.BoxOpacity = Math.Clamp(cfg.BoxOpacity, 0.35, 1.0);
+        cfg.BoxOpacity = double.IsFinite(cfg.BoxOpacity) ? Math.Clamp(cfg.BoxOpacity, 0, 1.0) : 0.35;
         cfg.IconSize = Math.Clamp(cfg.IconSize, 32, 96);
-        cfg.CornerRadius = Math.Clamp(cfg.CornerRadius, 0, 22);
-        cfg.GlassBlur = double.IsFinite(cfg.GlassBlur) ? Math.Clamp(cfg.GlassBlur, 0, 16) : 5;
-        cfg.GlassRefraction = double.IsFinite(cfg.GlassRefraction) ? Math.Clamp(cfg.GlassRefraction, 0, 28) : 12;
+        cfg.CornerRadius = double.IsFinite(cfg.CornerRadius) ? Math.Clamp(cfg.CornerRadius, 10, 100) : 22;
+        cfg.GlassBlur = double.IsFinite(cfg.GlassBlur) ? Math.Clamp(cfg.GlassBlur, 0, 16) : 0;
+        cfg.GlassRefraction = double.IsFinite(cfg.GlassRefraction) ? Math.Clamp(cfg.GlassRefraction, 0, 80) : 28;
 
         foreach (var box in cfg.Boxes)
         {

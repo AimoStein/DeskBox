@@ -18,7 +18,7 @@ internal static class GlassPreview
     internal static void Run(string? output)
     {
         ThemeManager.Apply(ThemeMode.Light);
-        var config = new AppConfig { LiquidGlassEnabled = true, CornerRadius = 22, BoxOpacity = 0.65 };
+        var config = new AppConfig();
         var window = new Window
         {
             Title = "Liquid Glass 预览", Width = 440, Height = 340,
@@ -96,6 +96,13 @@ internal static class GlassPreview
 
     internal static void SaveTexture(LiquidGlassEngine engine, ID3D11Texture2D texture, string path)
     {
+        var bitmap = CopyTexture(engine, texture);
+        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var file = File.Create(path); encoder.Save(file);
+    }
+
+    internal static BitmapSource CopyTexture(LiquidGlassEngine engine, ID3D11Texture2D texture)
+    {
         var description = texture.Description;
         description.Usage = ResourceUsage.Staging;
         description.BindFlags = BindFlags.None;
@@ -108,8 +115,8 @@ internal static class GlassPreview
         {
             var bitmap = BitmapSource.Create((int)description.Width, (int)description.Height, 96, 96,
                 PixelFormats.Bgra32, null, mapped.DataPointer, (int)(mapped.RowPitch * description.Height), (int)mapped.RowPitch);
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            using var file = File.Create(path); encoder.Save(file);
+            bitmap.Freeze();
+            return bitmap;
         }
         finally { engine.Context.Unmap(staging, 0); }
     }

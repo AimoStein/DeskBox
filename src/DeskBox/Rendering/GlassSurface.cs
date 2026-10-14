@@ -28,6 +28,7 @@ internal sealed class GlassSurface : IDisposable
     internal Func<GlassParameters> GetParameters { get; }
     internal Action<bool> AvailabilityChanged { get; }
     internal long Draws { get; private set; }
+    internal long LockMisses { get; private set; }
     internal void SaveFrame(string path)
     {
         if (_texture11 is not null) GlassPreview.SaveTexture(_engine, _texture11, path);
@@ -56,9 +57,12 @@ internal sealed class GlassSurface : IDisposable
         var height = Math.Clamp((int)Math.Ceiling(bounds.Height), 1, 8192);
         if (capture.Texture is null || bounds.IsEmpty) { SetAvailable(false); return false; }
         if (!Image.IsFrontBufferAvailable) { SetAvailable(false); return false; }
-        if (!Image.TryLock(new Duration(TimeSpan.Zero))) return false;
+        var acquired = Image.TryLock(new Duration(TimeSpan.Zero));
         try
         {
+            // D3DImage.TryLock increments its lock count even when it returns false.
+            // Every completed call must be paired with Unlock, including skipped frames.
+            if (!acquired) { LockMisses++; return false; }
             if (_width != width || _height != height || _target is null)
             {
                 ReleaseTarget();

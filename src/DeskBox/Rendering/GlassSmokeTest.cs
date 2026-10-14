@@ -17,7 +17,7 @@ internal static class GlassSmokeTest
         var fixture = Path.Combine(output, "fixtures");
         Directory.CreateDirectory(fixture);
         File.WriteAllText(Path.Combine(fixture, "玻璃测试.txt"), "DeskBox isolated rendering fixture");
-        var config = new AppConfig { CornerRadius = 10, BoxOpacity = 0.94 };
+        var config = new AppConfig();
         ThemeManager.Apply(ThemeMode.System);
         var firstConfig = new BoxConfig { Title = "玻璃测试 A", Folder = fixture,
             X = SystemParameters.WorkArea.Right - 850, Y = SystemParameters.WorkArea.Bottom - 390, Width = 350, Height = 270 };
@@ -34,6 +34,7 @@ internal static class GlassSmokeTest
         }
         var second = 0;
         long previousFrames = 0;
+        long[]? previousDraws = null;
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         timer.Tick += (_, _) =>
         {
@@ -97,6 +98,20 @@ internal static class GlassSmokeTest
                     ThemeManager.Apply(ThemeMode.Light);
                     break;
                 case 10:
+                    // A caller holding the image makes nested TryLock return false.
+                    // Leave it held for one second to exercise the skipped-frame path.
+                    foreach (var surface in engine!.Surfaces) surface.Image.Lock();
+                    break;
+                case 11:
+                    foreach (var surface in engine!.Surfaces) surface.Image.Unlock();
+                    previousDraws = engine.Surfaces.Select(s => s.Draws).ToArray();
+                    Check("繁忙时跳过绘制", engine.Surfaces.All(s => s.LockMisses > 0));
+                    break;
+                case 12:
+                    Check("跳过绘制后仍持续更新", engine!.Surfaces.Select((s, i) => s.Draws > previousDraws![i]).All(x => x));
+                    AppearanceTest.Run(engine, windows, config, output, Check);
+                    break;
+                case 14:
                     timer.Stop();
                     foreach (var window in windows) window.Close();
                     Check("关闭全部盒子释放 GPU 服务", LiquidGlassEngine.Current is null);
