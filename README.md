@@ -116,6 +116,7 @@ DeskBox.exe --action=undo         撤销上次整理
 DeskBox.exe --action=settings     打开设置
 DeskBox.exe --action=addto --paths="文件路径"   把文件加入某个盒子
 DeskBox.exe --action=exit         退出
+DeskBox.exe --action=glassdiagnose --paths="输出目录"   导出正在运行的盒子的玻璃诊断画面
 DeskBox.exe --startup             开机自启时使用（不弹窗）
 ```
 
@@ -145,7 +146,9 @@ DeskBox.exe --glass-probe=C:\Temp\DeskBoxGlassProbe
 DeskBox.exe --glass-smoketest=C:\Temp\DeskBoxGlassSmoke
 ```
 
-预览按 Esc 关闭。Probe 在八秒内记录实际捕获/渲染帧数并导出两次画面，随后退出；这些画面只写到指定本地目录。Smoke 使用该目录内的测试文件验证两盒子共享捕获、移动、缩放、收起、深浅主题、隐藏恢复、开关和资源释放，十秒后退出。需要 Wallpaper Engine 正在播放视频。
+预览按 Esc 关闭。Probe 在八秒内记录实际捕获/渲染帧数并导出两次画面，随后退出；这些画面只写到指定本地目录。Smoke 使用该目录内的测试文件验证两盒子共享捕获、移动、缩放、收起、深浅主题、隐藏恢复、开关和资源释放，也会模拟 WPF 丢失显示缓冲区并验证恢复后的实际合成画面，十秒后退出。需要 Wallpaper Engine 正在播放视频。
+
+`--action=glassdiagnose` 会导出正式盒子的 GPU 背景、WPF 合成画面与捕获/渲染计数，默认写入 `%TEMP%\DeskBoxGlassDiagnostic`，可以用 `--paths` 指定目录。合成画面含当前盒子里的文件名，只保存在本地；诊断不移动文件、不改变盒子配置。
 
 ## 许可
 

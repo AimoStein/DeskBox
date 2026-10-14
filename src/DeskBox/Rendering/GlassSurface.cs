@@ -68,9 +68,13 @@ internal sealed class GlassSurface : IDisposable
                 _surface9 = _texture9.GetSurfaceLevel(0);
                 _texture11 = _engine.Device.OpenSharedResource<ID3D11Texture2D>(shared);
                 _target = _engine.Device.CreateRenderTargetView(_texture11);
-                Image.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _surface9.NativePointer);
                 _width = width; _height = height;
             }
+            // WPF can drop its reference when the front buffer becomes unavailable.
+            // Native targets may still be valid, so rebind even when size has not changed.
+            // Reusing the same bound pointer is a no-op; software fallback also preserves it.
+            Image.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _surface9!.NativePointer,
+                enableSoftwareFallback: true);
             var parameters = GetParameters();
             parameters.Shape.X = width; parameters.Shape.Y = height;
             parameters.Region = new Vector4(

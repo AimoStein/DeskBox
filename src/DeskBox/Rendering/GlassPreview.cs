@@ -75,6 +75,25 @@ internal static class GlassPreview
         timer.Start();
     }
 
+    internal static void SaveVisual(FrameworkElement visual, string path)
+    {
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(visual.ActualWidth),
+            (int)Math.Ceiling(visual.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var file = File.Create(path); encoder.Save(file);
+    }
+
+    internal static bool HasVisibleGlass(FrameworkElement visual)
+    {
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(visual.ActualWidth),
+            (int)Math.Ceiling(visual.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        var pixel = new byte[4];
+        bitmap.CopyPixels(new Int32Rect(bitmap.PixelWidth / 2, bitmap.PixelHeight / 2, 1, 1), pixel, 4, 0);
+        return pixel[3] > 200;
+    }
+
     internal static void SaveTexture(LiquidGlassEngine engine, ID3D11Texture2D texture, string path)
     {
         var description = texture.Description;

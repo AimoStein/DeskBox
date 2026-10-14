@@ -37,10 +37,24 @@ internal sealed class LiquidGlassEngine : IDisposable
     internal ID3D11DeviceContext Context { get; }
     internal IDirect3DDevice9Ex Device9 { get; }
     internal IReadOnlyList<WallpaperCapture> Captures => _captures;
+    internal IReadOnlyList<GlassSurface> Surfaces => _surfaces;
     internal double LastTickMilliseconds { get; private set; }
     internal long Ticks { get; private set; }
     internal string SurfaceStatus => string.Join("; ", _surfaces.Select(s => $"draws={s.Draws}, front={s.Image.IsFrontBufferAvailable}, bounds={s.GetBounds()}"));
     internal void SaveSurface(string path) => _surfaces.FirstOrDefault()?.SaveFrame(path);
+
+    internal void SaveDiagnostics(string output)
+    {
+        Directory.CreateDirectory(output);
+        File.WriteAllText(Path.Combine(output, "renderer.txt"),
+            $"dark={ThemeManager.IsDark}; ticks={Ticks}; tickMs={LastTickMilliseconds:F2}\n{SurfaceStatus}\n" +
+            string.Join("\n", _captures.Select(c => $"window={c.Window}; host={c.CaptureWindow}; frames={c.Frames}; bounds={c.Bounds}")));
+        for (var i = 0; i < _surfaces.Count; i++)
+            _surfaces[i].SaveFrame(Path.Combine(output, $"surface-{i}.png"));
+        for (var i = 0; i < _captures.Count; i++)
+            if (_captures[i].Texture is { } texture)
+                GlassPreview.SaveTexture(this, texture, Path.Combine(output, $"wallpaper-{i}.png"));
+    }
 
     private LiquidGlassEngine(nint window)
     {

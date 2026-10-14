@@ -525,6 +525,17 @@ public partial class App : Application
             return;
         }
 
+        if (action.Equals("glassdiagnose", StringComparison.OrdinalIgnoreCase))
+        {
+            var output = paths ?? Path.Combine(Path.GetTempPath(), "DeskBoxGlassDiagnostic");
+            Directory.CreateDirectory(output);
+            Rendering.LiquidGlassEngine.Current?.SaveDiagnostics(output);
+            foreach (var box in _boxes.Where(b => b.IsVisible))
+                Rendering.GlassPreview.SaveVisual(box, Path.Combine(output, $"box-{box.Config.Id}.png"));
+            Log.Info($"玻璃诊断已导出：{output}");
+            return;
+        }
+
         HandleCommand(action.ToLowerInvariant());
     }
 

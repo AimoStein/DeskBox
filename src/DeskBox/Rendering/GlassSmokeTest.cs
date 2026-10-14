@@ -17,8 +17,8 @@ internal static class GlassSmokeTest
         var fixture = Path.Combine(output, "fixtures");
         Directory.CreateDirectory(fixture);
         File.WriteAllText(Path.Combine(fixture, "玻璃测试.txt"), "DeskBox isolated rendering fixture");
-        var config = new AppConfig { CornerRadius = 20, BoxOpacity = 0.65 };
-        ThemeManager.Apply(ThemeMode.Light);
+        var config = new AppConfig { CornerRadius = 10, BoxOpacity = 0.94 };
+        ThemeManager.Apply(ThemeMode.System);
         var firstConfig = new BoxConfig { Title = "玻璃测试 A", Folder = fixture,
             X = SystemParameters.WorkArea.Right - 850, Y = SystemParameters.WorkArea.Bottom - 390, Width = 350, Height = 270 };
         var secondConfig = new BoxConfig { Title = "玻璃测试 B", Folder = fixture,
@@ -46,10 +46,28 @@ internal static class GlassSmokeTest
                     Check("两个正式盒子共用壁纸捕获", engine?.Captures.Count == 1);
                     previousFrames = engine?.Captures.Sum(c => c.Frames) ?? 0;
                     Check("两个盒子均显示 GPU 玻璃", windows.All(w => ((GlassBackdrop)w.FindName("GlassBackground")).Opacity == 1));
+                    engine?.SaveSurface(Path.Combine(output, "before-surface.png"));
+                    if (engine?.Captures.FirstOrDefault()?.Texture is { } wallpaper)
+                        GlassPreview.SaveTexture(engine, wallpaper, Path.Combine(output, "wallpaper.png"));
+                    GlassPreview.SaveVisual(windows[0], Path.Combine(output, "before-composite.png"));
+                    Check("WPF 实际合成了玻璃背景", windows.All(w =>
+                        GlassPreview.HasVisibleGlass((GlassBackdrop)w.FindName("GlassBackground"))));
+                    // Model WPF dropping its back-buffer reference while native targets stay alive.
+                    foreach (var surface in engine!.Surfaces)
+                    {
+                        surface.Image.Lock();
+                        try { surface.Image.SetBackBuffer(System.Windows.Interop.D3DResourceType.IDirect3DSurface9, 0); }
+                        finally { surface.Image.Unlock(); }
+                    }
+                    Check("模拟显示缓冲区丢失后玻璃确实不可见", windows.All(w =>
+                        !GlassPreview.HasVisibleGlass((GlassBackdrop)w.FindName("GlassBackground"))));
                     windows[0].MoveContentTo(firstConfig.X + 40, firstConfig.Y + 20);
                     windows[1].Width += 96;
                     break;
                 case 3:
+                    GlassPreview.SaveVisual(windows[0], Path.Combine(output, "after-recovery-composite.png"));
+                    Check("显示缓冲区丢失后恢复实际玻璃画面", windows.All(w =>
+                        GlassPreview.HasVisibleGlass((GlassBackdrop)w.FindName("GlassBackground"))));
                     Check("视频持续更新", (engine?.Captures.Sum(c => c.Frames) ?? 0) > previousFrames);
                     ((Button)windows[0].FindName("CollapseButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     Check("收起盒子", firstConfig.Collapsed);
