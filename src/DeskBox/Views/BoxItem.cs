@@ -59,6 +59,9 @@ public sealed class BoxItem : INotifyPropertyChanged
 
     public double ItemWidth { get; private set; }
 
+    // Includes the icon template's 1 DIP margin on each side.
+    internal static double CellWidth(int iconSize) => iconSize + 16;
+
     /// <summary>固定高度：所有条目一样高，缩小 / 放大才能按格子顿挫。</summary>
     public double ItemHeight { get; private set; }
 
@@ -66,7 +69,7 @@ public sealed class BoxItem : INotifyPropertyChanged
     {
         if (size == IconSize) return false;
         IconSize = size;
-        ItemWidth = size + 26;
+        ItemWidth = CellWidth(size) - 2;
         ItemHeight = size + 48;
         Raise(nameof(IconSize));
         Raise(nameof(ItemWidth));

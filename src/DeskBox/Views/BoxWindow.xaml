@@ -17,7 +17,7 @@
 
     <Window.Resources>
         <ItemsPanelTemplate x:Key="IconPanel">
-            <views:CenteredIconPanel IsItemsHost="True" />
+            <views:IconGridPanel IsItemsHost="True" />
         </ItemsPanelTemplate>
 
         <ItemsPanelTemplate x:Key="ListPanel">
@@ -173,7 +173,7 @@
                 </Grid>
 
                 <!-- 内容区 -->
-                <Grid Grid.Row="1" Margin="6,0,6,6">
+                <Grid x:Name="ContentArea" Grid.Row="1" Margin="2,0,2,6">
                     <!-- 隐藏右侧滚动条：滚轮照常滚动，但永远不显示侧滑块 -->
                     <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Hidden"
                                   HorizontalScrollBarVisibility="Disabled" Padding="0,2,0,2">

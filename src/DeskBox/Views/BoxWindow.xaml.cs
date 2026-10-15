@@ -18,7 +18,7 @@ public partial class BoxWindow : Window
 {
     public const double ShadowPad = 12;
     private const double TitleHeight = 34;
-    internal const double ContentHorizontalChrome = 18; // border + symmetric margin + scroll padding
+    internal const double ContentHorizontalChrome = 6; // icon view: 1 DIP border + 2 DIP content margin per side
     internal const double ContentVerticalChrome = 46;   // border + title + bottom margin + scroll padding
     private bool _fittingHeight;
 
@@ -484,6 +484,7 @@ public partial class BoxWindow : Window
         {
             ItemsHost.ItemsPanel = (ItemsPanelTemplate)FindResource("ListPanel");
             ItemsHost.ItemTemplate = (DataTemplate)FindResource("ListItemTemplate");
+            ContentArea.Margin = new Thickness(6, 0, 6, 6);
             Scroller.Padding = new Thickness(0, 2, 0, 2);
             ViewIcon.Fill = null;
             ViewIcon.Stroke = (Brush)FindResource("TextSecondaryBrush");
@@ -493,7 +494,8 @@ public partial class BoxWindow : Window
         {
             ItemsHost.ItemsPanel = (ItemsPanelTemplate)FindResource("IconPanel");
             ItemsHost.ItemTemplate = (DataTemplate)FindResource("IconItemTemplate");
-            Scroller.Padding = new Thickness(2, 2, 2, 2);
+            ContentArea.Margin = new Thickness(2, 0, 2, 6);
+            Scroller.Padding = new Thickness(0, 2, 0, 2);
             ViewIcon.Stroke = null;
             ViewIcon.Fill = (Brush)FindResource("TextSecondaryBrush");
             ViewIcon.Data = Geometry.Parse("M0,0 H4.6 V4.6 H0 Z M7.2,0 H11.8 V4.6 H7.2 Z M0,7.2 H4.6 V11.8 H0 Z M7.2,7.2 H11.8 V11.8 H7.2 Z");
@@ -1683,7 +1685,7 @@ public partial class BoxWindow : Window
     {
         if (_fittingHeight || !double.IsFinite(Width)) return;
         var size = (int)_config.IconSize;
-        var columns = _box.ListView ? 1 : CellGrid.Count(Width - ShadowPad * 2 - ContentHorizontalChrome, size + 28);
+        var columns = _box.ListView ? 1 : CellGrid.Count(Width - ShadowPad * 2 - ContentHorizontalChrome, BoxItem.CellWidth(size));
         var rows = CellGrid.CellsFor(_items.Count, columns);
         var rowHeight = _box.ListView ? size + 12 : size + 50;
         var desired = Math.Clamp(ContentVerticalChrome + rows * rowHeight, 120,
@@ -1788,7 +1790,7 @@ public partial class BoxWindow : Window
     /// </summary>
     private void MeasureResizeGrid()
     {
-        _resizeCellWidth = (int)_config.IconSize + 28;
+        _resizeCellWidth = BoxItem.CellWidth((int)_config.IconSize);
     }
 
     private void Resize_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => EndResize();

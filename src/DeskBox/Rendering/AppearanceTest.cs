@@ -142,24 +142,31 @@ internal static class AppearanceTest
             window.Config.ListView = false; window.RefreshFromConfig(false);
             void Resize(int columns, double extraWidth = 0)
             {
-                window.Width = BoxWindow.ShadowPad * 2 + BoxWindow.ContentHorizontalChrome + columns * 65 + extraWidth;
+                window.Width = BoxWindow.ShadowPad * 2 + BoxWindow.ContentHorizontalChrome + columns * BoxItem.CellWidth(37) + extraWidth;
                 window.FitContentHeight(); window.UpdateLayout();
             }
             window.ReloadItems(); Resize(4);
             check("8 个图标、4 列自动得到 2 行高度", window.Config.Height == BoxWindow.ContentVerticalChrome + 2 * 87);
-            Resize(4, 31);
             var frame = (Border)window.FindName("Frame");
+            double FirstInset() => ItemImages(window).Min(i => i.TranslatePoint(new Point(), frame).X);
+            var inset = FirstInset();
+            check("图标距边缘缩窄为 11 DIP", Math.Abs(inset - 11) <= 1);
+            Resize(4, 31);
             var icons = ItemImages(window).Select(i => (Image: i, Point: i.TranslatePoint(new Point(0, 0), frame))).ToArray();
             var firstY = icons.Min(i => i.Point.Y);
             var firstRow = icons.Where(i => Math.Abs(i.Point.Y - firstY) < 1).OrderBy(i => i.Point.X).ToArray();
             var left = firstRow[0].Point.X;
             var right = frame.ActualWidth - firstRow[^1].Point.X - firstRow[^1].Image.ActualWidth;
-            check("有宽度余量时，图标组左右留白相等", firstRow.Length == 4 && Math.Abs(left - right) <= 1);
-            GlassPreview.SaveVisual(window, Path.Combine(output, "centered-icons.png"));
+            check("有宽度余量时，两侧仍保持相同窄留白", firstRow.Length == 4 && Math.Abs(left - right) <= 1 && Math.Abs(left - inset) <= 1);
+            GlassPreview.SaveVisual(window, Path.Combine(output, "narrow-insets.png"));
             Resize(3);
             check("手动收窄成 3 列后高度自动变成 3 行", window.Config.Height == BoxWindow.ContentVerticalChrome + 3 * 87);
+            var rows = ItemImages(window).ToArray();
+            check("末行首个图标仍与首列对齐", Math.Abs(rows[6].TranslatePoint(new Point(), frame).X - inset) <= 1);
             Resize(8);
             check("手动加宽成 8 列后高度自动变成 1 行", window.Config.Height == BoxWindow.ContentVerticalChrome + 87);
+            Resize(12, 19);
+            check("图标未填满首行时不会整组居中增加留白", Math.Abs(FirstInset() - inset) <= 1);
             Resize(4);
             File.WriteAllText(extra, "isolated count-change fixture"); window.ReloadItems(); window.UpdateLayout();
             check("增加第 9 个图标后高度自动增加一行", window.Config.Height == BoxWindow.ContentVerticalChrome + 3 * 87);
