@@ -102,10 +102,17 @@ public static class NativeMethods
 
     public static readonly IntPtr HWND_BOTTOM = new(1);
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    public static readonly IntPtr HWND_NOTOPMOST = new(-2);
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOACTIVATE = 0x0010;
+
+    /// <summary>GetWindow 命令：z 序里紧挨在上面的那个窗口。</summary>
+    public const uint GW_HWNDPREV = 3;
+
+    /// <summary>GetWindow 命令：z 序里紧挨在下面的那个窗口。</summary>
+    public const uint GW_HWNDNEXT = 2;
 
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
@@ -113,10 +120,25 @@ public static class NativeMethods
     public const int SW_SHOWNOACTIVATE = 4;
 
     public const int GWL_EXSTYLE = -20;
+    public const int WS_EX_TOPMOST = 0x00000008;
     public const int WS_EX_TRANSPARENT = 0x00000020;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_LAYERED = 0x00080000;
     public const int WS_EX_NOACTIVATE = 0x08000000;
+
+    /// <summary>SHChangeNotify：目录内容变了（配合 SHCNF_PATHW 时 dwItem1 是宽字符路径）。</summary>
+    public const uint SHCNE_UPDATEDIR = 0x00001000;
+
+    public const uint SHCNF_PATHW = 0x0005;
+    public const uint SHCNF_FLUSHNOWAIT = 0x3000;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    internal static bool IsLeftMouseButtonDown() => (GetAsyncKeyState(0x01) & 0x8000) != 0;
+
+    [DllImport("shell32.dll", EntryPoint = "SHChangeNotify")]
+    internal static extern void SHChangeNotifyIdList(uint eventId, uint flags, IntPtr item1, IntPtr item2);
 
     public const uint FO_DELETE = 0x0003;
     public const ushort FOF_SILENT = 0x0004;
@@ -131,6 +153,22 @@ public static class NativeMethods
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetTopWindow(IntPtr hWnd);
+
+    [DllImport("shell32.dll", EntryPoint = "SHChangeNotify", ExactSpelling = true)]
+    public static extern void SHChangeNotify(
+        uint wEventId,
+        uint uFlags,
+        [MarshalAs(UnmanagedType.LPWStr)] string? dwItem1,
+        [MarshalAs(UnmanagedType.LPWStr)] string? dwItem2);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -241,25 +279,73 @@ public static class NativeMethods
         }
     }
 
+    /// <summary>缓存桌面相关窗口句柄：压底不再是"每次调用都全屏扫描一遍"。</summary>
+    private static IntPtr _cachedProgman;
+    private static IntPtr _cachedDesktopDefView;
+
+    /// <summary>
+    /// 取 Progman 句柄；缓存失效（IsWindow 为假，例如 explorer 重启过）时重找。
+    /// 注意：本机实测 FindWindow("Progman") 会返回 0，所以再沿 z 序扫描类名兜底。
+    /// </summary>
+    private static IntPtr CachedProgman()
+    {
+        if (!IsWindow(_cachedProgman))
+        {
+            _cachedProgman = FindWindow("Progman", null);
+
+            if (_cachedProgman == IntPtr.Zero)
+            {
+                var hwnd = GetTopWindow(IntPtr.Zero);
+                while (hwnd != IntPtr.Zero)
+                {
+                    if (ClassNameOf(hwnd).Equals("Progman", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _cachedProgman = hwnd;
+                        break;
+                    }
+
+                    hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+                }
+            }
+        }
+
+        return _cachedProgman;
+    }
+
+    /// <summary>
+    /// 桌面（壁纸 + 图标）所在的顶层窗口：优先用承载 SHELLDLL_DefView 的那个顶层窗口，
+    /// 找不到再退回 Progman。判断"盒子有没有被桌面盖住 / 该插到哪一层"都以它为基准。
+    /// </summary>
+    public static IntPtr DesktopRoot()
+    {
+        var defView = FindDesktopDefView();
+        var root = defView == IntPtr.Zero ? IntPtr.Zero : GetAncestor(defView, GA_ROOT);
+
+        return root != IntPtr.Zero ? root : CachedProgman();
+    }
+
     /// <summary>
     /// 把桌面窗口压回 z 序最底层。
     ///
     /// 按 Win+D（显示桌面）时系统会把桌面窗口提到盒子上面，盒子这时已经贴着 z 序底部、
     /// 受 z 序带次限制，光把自己抬高没有用（实测抬不动）。把桌面压回底层才会重新露出盒子，
     /// 而且盒子依旧在普通窗口之下。
+    ///
+    /// 注意：这个方法本身会重排窗口，调用方必须确认"盒子真的被桌面盖住"再调，
+    /// 否则分层玻璃窗口被反复重排，看起来就是格子闪烁。
     /// </summary>
     public static void PushDesktopToBottom()
     {
-        var progman = FindWindow("Progman", null);
+        var progman = CachedProgman();
+        var defView = FindDesktopDefView();
+        var root = defView == IntPtr.Zero ? IntPtr.Zero : GetAncestor(defView, GA_ROOT);
+
         if (progman != IntPtr.Zero)
         {
             SetWindowPos(progman, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         // 图标视图挂在某个 WorkerW 里时，被提上去的是那个 WorkerW
-        var defView = FindDesktopDefView();
-        var root = defView == IntPtr.Zero ? IntPtr.Zero : GetAncestor(defView, GA_ROOT);
-
         if (root != IntPtr.Zero && root != progman)
         {
             SetWindowPos(root, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -296,6 +382,20 @@ public static class NativeMethods
     public static bool DesktopIsForeground() => IsDesktopWindow(GetForegroundWindow());
 
     /// <summary>
+    /// 任务栏相关的窗口类：点任务栏 / 开始菜单 / 任务栏缩略图只会改变前台，
+    /// 不会盖住盒子，这时不该产生任何 z 序动作（否则盒子会闪）。
+    /// </summary>
+    public static bool IsShellTrayClass(string className)
+    {
+        return className.Equals("Shell_TrayWnd", StringComparison.OrdinalIgnoreCase) ||
+               className.Equals("Shell_SecondaryTrayWnd", StringComparison.OrdinalIgnoreCase) ||
+               className.Equals("TaskListThumbnailWnd", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>这个窗口是不是任务栏相关窗口。</summary>
+    public static bool IsShellTrayWindow(IntPtr hwnd) => IsShellTrayClass(ClassNameOf(hwnd));
+
+    /// <summary>
     /// 窗口中心点当前是不是被桌面层盖住了（Win+D 之后就是这个状态）。
     /// 被普通窗口挡住不算——那种情况本来就该让普通窗口在上面。
     /// </summary>
@@ -325,6 +425,144 @@ public static class NativeMethods
     }
 
     /// <summary>
+    /// 多个采样点是不是全都被桌面窗口盖住。
+    /// 单点容易被瞬态窗口骗到，所以要求每个点命中的都是桌面类窗口；
+    /// 这条同时覆盖了"桌面在前台或命中窗口确实是桌面类"——命中窗口全是桌面类已经足够，
+    /// 而普通窗口挡住盒子属于正常层叠（本来就该让普通窗口在上面），不算被桌面盖住。
+    /// </summary>
+    public static bool IsCoveredByDesktop(IReadOnlyList<POINT> points)
+    {
+        if (points.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var point in points)
+        {
+            var hit = WindowFromPoint(point);
+            if (hit == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            if (!IsDesktopWindow(hit) && !IsDesktopWindow(GetAncestor(hit, GA_ROOT)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>盒子"保持可见"的 z 序动作走了哪条路径（写进日志，用来核对 z 序语义）。</summary>
+    public enum ZOrderAction
+    {
+        /// <summary>句柄无效，什么都没做。</summary>
+        NoTarget,
+
+        /// <summary>盒子本来就露在桌面之上（自校验通过，没有动过任何窗口）。</summary>
+        AlreadyAbove,
+
+        /// <summary>把盒子插回桌面之上，自校验通过。</summary>
+        PlacedAboveDesktop,
+
+        /// <summary>桌面根窗口在整个 z 序最上面：没有"桌面之上"可插，退化为把桌面压回底层。</summary>
+        FellBackNoInsertAfter,
+
+        /// <summary>插入之后自校验没过，退化为把桌面压回底层。</summary>
+        FellBackVerifyFailed,
+
+        /// <summary>本该退化压桌面，但同一批里已经压过一次，这次不动（避免重复重排）。</summary>
+        FallbackSuppressed,
+    }
+
+    /// <summary>
+    /// 把被桌面盖住的盒子插回"桌面之上"——不动桌面窗口，只挪我们自己的盒子。
+    /// 改桌面（Progman）的 z 序会触发整屏重绘（用户看到所有格子闪一下），所以只在退化时才做。
+    ///
+    /// insertAfter 取 z 序里紧挨在桌面根窗口上面的那个窗口，把盒子插在它下面，
+    /// 结果就是"紧贴桌面上方、仍在所有普通窗口之下"。
+    /// 插完必须自校验：盒子内容区中心要重新命中盒子自己；而且盒子不能被搞成置顶窗口
+    /// （insertAfter 落在置顶带里时系统会把被插窗口一起变成置顶）。
+    /// </summary>
+    public static ZOrderAction PlaceBoxAboveDesktop(
+        IntPtr hwnd,
+        IntPtr desktopRoot,
+        POINT contentCenter,
+        bool allowDesktopFallback)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return ZOrderAction.NoTarget;
+        }
+
+        if (HitsSelf(hwnd, contentCenter))
+        {
+            return ZOrderAction.AlreadyAbove;
+        }
+
+        if (desktopRoot == IntPtr.Zero)
+        {
+            return Fallback(allowDesktopFallback) ? ZOrderAction.FellBackNoInsertAfter : ZOrderAction.FallbackSuppressed;
+        }
+
+        var insertAfter = GetWindow(desktopRoot, GW_HWNDPREV);
+        if (insertAfter == IntPtr.Zero)
+        {
+            // 桌面根窗口已经压在整个 z 序最上面：没有"桌面之上"的位置可插
+            return Fallback(allowDesktopFallback) ? ZOrderAction.FellBackNoInsertAfter : ZOrderAction.FallbackSuppressed;
+        }
+
+        // 桌面根窗口位于非置顶带最上面时（典型是 Win+D），它上面就是置顶带：
+        // 直接拿置顶窗口当 insertAfter 会把盒子也变成置顶（以后会盖住所有普通窗口），
+        // 这里改用 HWND_TOP —— 非置顶窗口会停在非置顶带顶部，正好就是"紧贴桌面上方"。
+        var target = IsTopmostWindow(insertAfter) ? HWND_TOP : insertAfter;
+
+        SetWindowPos(hwnd, target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+        if (HitsSelf(hwnd, contentCenter) && !IsTopmostWindow(hwnd))
+        {
+            return ZOrderAction.PlacedAboveDesktop;
+        }
+
+        // 兜底：万一还是被顶成置顶窗口，先改回来再走退化路径
+        if (IsTopmostWindow(hwnd))
+        {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+
+        return Fallback(allowDesktopFallback) ? ZOrderAction.FellBackVerifyFailed : ZOrderAction.FallbackSuppressed;
+    }
+
+    /// <summary>退化路径：把桌面压回最底层（会触发整屏重绘，所以只能兜底用）。</summary>
+    private static bool Fallback(bool allowDesktopFallback)
+    {
+        if (!allowDesktopFallback)
+        {
+            return false;
+        }
+
+        PushDesktopToBottom();
+        return true;
+    }
+
+    /// <summary>这个点命中的是不是 hwnd 自己（或它的子窗口）。</summary>
+    private static bool HitsSelf(IntPtr hwnd, POINT point)
+    {
+        var hit = WindowFromPoint(point);
+        if (hit == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        return hit == hwnd || GetAncestor(hit, GA_ROOT) == hwnd;
+    }
+
+    /// <summary>窗口是不是置顶窗口（WS_EX_TOPMOST）。</summary>
+    public static bool IsTopmostWindow(IntPtr hwnd) =>
+        hwnd != IntPtr.Zero && (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+
+    /// <summary>
     /// 让窗口鼠标穿透、不抢焦点、不出现在 Alt+Tab —— 拖动盒子时的对齐参考线用这个。
     /// </summary>
     public static void MakeOverlay(IntPtr hwnd)
@@ -341,45 +579,54 @@ public static class NativeMethods
             style | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED);
     }
 
-    /// <summary>定位承载桌面图标的 SHELLDLL_DefView。</summary>
+    /// <summary>
+    /// 定位承载桌面图标的 SHELLDLL_DefView。
+    /// 结果带缓存（IsWindow 校验失效后重找），避免每次调用都做一遍 EnumWindows 全屏扫描。
+    /// </summary>
     public static IntPtr FindDesktopDefView()
     {
-        var progman = FindWindow("Progman", null);
+        if (IsWindow(_cachedDesktopDefView))
+        {
+            return _cachedDesktopDefView;
+        }
+
+        var progman = CachedProgman();
 
         var defView = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-        if (defView != IntPtr.Zero)
+        if (defView == IntPtr.Zero)
         {
-            return defView;
+            // Windows 10/11：图标视图挂在 Progman 下的某个 WorkerW 里
+            var worker = FindWindowEx(progman, IntPtr.Zero, "WorkerW", null);
+            while (worker != IntPtr.Zero)
+            {
+                defView = FindWindowEx(worker, IntPtr.Zero, "SHELLDLL_DefView", null);
+                if (defView != IntPtr.Zero)
+                {
+                    break;
+                }
+
+                worker = FindWindowEx(progman, worker, "WorkerW", null);
+            }
         }
 
-        // Windows 10/11：图标视图挂在 Progman 下的某个 WorkerW 里
-        var worker = FindWindowEx(progman, IntPtr.Zero, "WorkerW", null);
-        while (worker != IntPtr.Zero)
+        if (defView == IntPtr.Zero)
         {
-            defView = FindWindowEx(worker, IntPtr.Zero, "SHELLDLL_DefView", null);
-            if (defView != IntPtr.Zero)
+            // 兜底：直接扫描顶层窗口（只在缓存失效后才会走到这里）
+            EnumWindows((top, _) =>
             {
-                return defView;
-            }
+                var view = FindWindowEx(top, IntPtr.Zero, "SHELLDLL_DefView", null);
+                if (view != IntPtr.Zero)
+                {
+                    defView = view;
+                    return false;
+                }
 
-            worker = FindWindowEx(progman, worker, "WorkerW", null);
+                return true;
+            }, IntPtr.Zero);
         }
 
-        // 兜底：直接扫描顶层窗口
-        IntPtr found = IntPtr.Zero;
-        EnumWindows((top, _) =>
-        {
-            var view = FindWindowEx(top, IntPtr.Zero, "SHELLDLL_DefView", null);
-            if (view != IntPtr.Zero)
-            {
-                found = view;
-                return false;
-            }
-
-            return true;
-        }, IntPtr.Zero);
-
-        return found;
+        _cachedDesktopDefView = defView;
+        return defView;
     }
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);

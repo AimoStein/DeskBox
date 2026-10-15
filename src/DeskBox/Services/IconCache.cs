@@ -1,180 +1,43 @@
 using System.Collections.Concurrent;
-using System.IO;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using DeskBox.Interop;
 
 namespace DeskBox.Services;
 
-/// <summary>用系统的 IShellItemImageFactory 取高清图标，.lnk 会自动解析成目标图标。</summary>
+/// <summary>
+/// 图标缓存门面：对外签名保持不变（BoxWindow / BoxItem 依赖），
+/// 真正的取图管线（常驻 STA 工作线程 + 队列 + 磁盘 PNG 缓存）在 <see cref="IconLoader"/>。
+/// 用系统的 IShellItemImageFactory 取高清图标，.lnk 会自动解析成目标图标。
+/// </summary>
 public static class IconCache
 {
-    private static readonly ConcurrentDictionary<string, BitmapSource?> Cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<int, BitmapSource> Placeholders = new();
 
-    private static readonly Guid IidShellItemImageFactory = new("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+    /// <summary>清空内存缓存（磁盘缓存保留，下次取图会走「磁盘命中」秒出）。</summary>
+    public static void Clear() => IconLoader.ClearMemory();
 
-    public static void Clear() => Cache.Clear();
+    /// <summary>删除所有以 path + "|" 开头的内存缓存项。</summary>
+    public static void Invalidate(string path) => IconLoader.InvalidatePrefix(path + "|");
 
-    public static void Invalidate(string path)
-    {
-        foreach (var key in Cache.Keys)
-        {
-            if (key.StartsWith(path + "|", StringComparison.OrdinalIgnoreCase))
-            {
-                Cache.TryRemove(key, out _);
-            }
-        }
-    }
+    /// <summary>异步取图：内存 → 磁盘缓存 → shell；失败返回 null，不抛异常。</summary>
+    public static Task<BitmapSource?> GetAsync(string path, int size) =>
+        IconLoader.LoadAsync(path, size, allowShell: true);
 
-    /// <summary>
-    /// 放到 STA 线程上取图标：Shell 的 COM 接口在 STA 下最稳，BitmapSource 冻结后可跨线程使用。
-    /// </summary>
-    public static Task<BitmapSource?> GetAsync(string path, int size)
-    {
-        var completion = new TaskCompletionSource<BitmapSource?>();
+    /// <summary>同步取图（兼容旧调用方）；shell 调用发生在 STA 工作线程上，不在调用线程。</summary>
+    public static BitmapSource? Get(string path, int size) => IconLoader.LoadBlocking(path, size);
 
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                completion.SetResult(Get(path, size));
-            }
-            catch (Exception ex)
-            {
-                completion.SetException(ex);
-            }
-        })
-        {
-            IsBackground = true,
-            Name = "DeskBox.Icon",
-        };
+    /// <summary>预热：后台把磁盘缓存解码进内存，不碰 shell，立即返回。</summary>
+    public static void Prewarm(IEnumerable<string> paths, int size) => IconLoader.Prewarm(paths, size);
 
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
+    /// <summary>只查内存缓存，立即返回，绝不碰 shell。</summary>
+    public static BitmapSource? TryGetFast(string path, int size) => IconLoader.TryGet(path, size);
 
-        return completion.Task;
-    }
-
-    public static BitmapSource? Get(string path, int size)
-    {
-        var key = BuildKey(path, size);
-        if (Cache.TryGetValue(key, out var cached))
-        {
-            return cached;
-        }
-
-        var image = Load(path, size);
-        if (image is not null)
-        {
-            Cache[key] = image;
-        }
-
-        return image;
-    }
+    /// <summary>例："内存命中 12 / 磁盘命中 40 / shell 提取 8"。</summary>
+    public static string StatsSummary() => IconLoader.StatsSummary();
 
     public static BitmapSource Placeholder(int size) =>
         Placeholders.GetOrAdd(size, CreatePlaceholder);
-
-    private static string BuildKey(string path, int size)
-    {
-        long ticks = 0;
-        try
-        {
-            if (File.Exists(path))
-            {
-                ticks = File.GetLastWriteTimeUtc(path).Ticks;
-            }
-            else if (Directory.Exists(path))
-            {
-                ticks = Directory.GetLastWriteTimeUtc(path).Ticks;
-            }
-        }
-        catch
-        {
-            // 拿不到时间戳就用 0
-        }
-
-        return $"{path}|{size}|{ticks}";
-    }
-
-    private static BitmapSource? Load(string path, int size)
-    {
-        // Shell 生成图标/缩略图有时会返回 E_PENDING，等一会儿再试
-        for (var attempt = 1; attempt <= 3; attempt++)
-        {
-            var image = TryLoadOnce(path, size, out var pending);
-            if (image is not null)
-            {
-                return image;
-            }
-
-            if (!pending)
-            {
-                return null;
-            }
-
-            Thread.Sleep(150 * attempt);
-        }
-
-        Log.Warn($"图标始终未就绪 {path}");
-        return null;
-    }
-
-    private static BitmapSource? TryLoadOnce(string path, int size, out bool pending)
-    {
-        pending = false;
-
-        try
-        {
-            if (!FsUtil.PathExists(path))
-            {
-                return null;
-            }
-
-            NativeMethods.SHCreateItemFromParsingName(path, IntPtr.Zero, IidShellItemImageFactory, out var factory);
-            try
-            {
-                var hr = factory.GetImage(
-                    new SIZE(size, size),
-                    SIIGBF.ICONONLY | SIIGBF.BIGGERSIZEOK,
-                    out var hBitmap);
-
-                // 0x8000000A = E_PENDING：Shell 还在准备图形资源
-                pending = hr == unchecked((int)0x8000000A);
-
-                if (hr != 0 || hBitmap == IntPtr.Zero)
-                {
-                    return null;
-                }
-
-                try
-                {
-                    var source = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
-                        hBitmap,
-                        IntPtr.Zero,
-                        Int32Rect.Empty,
-                        BitmapSizeOptions.FromEmptyOptions());
-                    source.Freeze();
-                    return source;
-                }
-                finally
-                {
-                    NativeMethods.DeleteObject(hBitmap);
-                }
-            }
-            finally
-            {
-                System.Runtime.InteropServices.Marshal.ReleaseComObject(factory);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"取图标失败 {path}: {ex.Message}");
-            return null;
-        }
-    }
 
     private static BitmapSource CreatePlaceholder(int size)
     {

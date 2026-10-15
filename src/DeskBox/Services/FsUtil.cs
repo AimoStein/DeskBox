@@ -1,12 +1,17 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using DeskBox.Interop;
 
 namespace DeskBox.Services;
 
 public static class FsUtil
 {
     private static readonly char[] Invalid = Path.GetInvalidFileNameChars();
+
+    /// <summary>同一个目录 200ms 内只通知 shell 一次，整批移动不会刷屏。</summary>
+    private static readonly Dictionary<string, DateTime> LastShellNotify = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object ShellNotifyLock = new();
 
     public static string Sanitize(string name)
     {
@@ -76,8 +81,9 @@ public static class FsUtil
 
         var name = Path.GetFileName(sourcePath.TrimEnd(Path.DirectorySeparatorChar));
         var target = UniquePath(targetDirectory, name);
+        var isDirectory = Directory.Exists(sourcePath);
 
-        if (Directory.Exists(sourcePath))
+        if (isDirectory)
         {
             Directory.Move(sourcePath, target);
         }
@@ -86,7 +92,67 @@ public static class FsUtil
             File.Move(sourcePath, target);
         }
 
+        // 逐项通知实际移动，避免目录整刷新导致全部格子闪烁，或 200ms 合并窗口漏掉批量末项。
+        try
+        {
+            NativeMethods.SHChangeNotify(isDirectory ? 0x10u : 0x4u,
+                NativeMethods.SHCNF_PATHW | 0x1000,
+                Path.GetFullPath(sourcePath), null); // SHCNE_RMDIR / DELETE + SHCNF_FLUSH
+            NativeMethods.SHChangeNotify(isDirectory ? 0x8u : 0x2u,
+                NativeMethods.SHCNF_PATHW | 0x1000,
+                Path.GetFullPath(target), null); // SHCNE_MKDIR / CREATE
+            var sourceFullPath = Path.GetFullPath(sourcePath);
+            var parent = Path.GetDirectoryName(sourceFullPath);
+            if (string.Equals(parent, Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(parent, Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), StringComparison.OrdinalIgnoreCase))
+                DesktopViewInterop.NotifyRemovedPaths(new[] { sourceFullPath });
+        }
+        catch (Exception ex) { Log.Warn("通知 Shell 文件移动失败：" + ex.Message); }
+
         return target;
+    }
+
+    /// <summary>
+    /// 告诉 shell"这个目录的内容变了"，让资源管理器立刻刷新（桌面图标也就立刻跟着变）。
+    /// 只做通知，任何失败只记日志，绝不影响移动结果。
+    /// </summary>
+    public static void NotifyShellDirectoryChanged(string? directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        try
+        {
+            var full = Path.GetFullPath(directory);
+
+            lock (ShellNotifyLock)
+            {
+                if (LastShellNotify.TryGetValue(full, out var last) &&
+                    DateTime.UtcNow - last < TimeSpan.FromMilliseconds(200))
+                {
+                    return;
+                }
+
+                if (LastShellNotify.Count > 64)
+                {
+                    LastShellNotify.Clear();
+                }
+
+                LastShellNotify[full] = DateTime.UtcNow;
+            }
+
+            NativeMethods.SHChangeNotify(
+                NativeMethods.SHCNE_UPDATEDIR,
+                NativeMethods.SHCNF_PATHW | NativeMethods.SHCNF_FLUSHNOWAIT,
+                full,
+                null);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"通知资源管理器刷新失败 {directory}: {ex.Message}");
+        }
     }
 
     public static bool IsHiddenOrSystem(string path)

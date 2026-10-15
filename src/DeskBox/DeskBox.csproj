@@ -19,7 +19,7 @@
     <Company>DeskBox</Company>
     <Copyright>Copyright (c) 2026 Aimo (MIT License)</Copyright>
     <Description>Offline desktop organizer: partition boxes, one-click tidy up, icon hiding.</Description>
-    <Version>1.4.4</Version>
+    <Version>1.4.6</Version>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
     <InvariantGlobalization>false</InvariantGlobalization>
     <NoWarn>$(NoWarn);WFAC010</NoWarn>

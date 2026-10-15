@@ -7,9 +7,9 @@ namespace DeskBox.Services;
 /// <summary>负责与「桌面」这个系统对象打交道：图标显隐、桌面条目枚举。</summary>
 public sealed class DesktopShell
 {
-    public DesktopShell()
+    public DesktopShell(string? desktopPath = null)
     {
-        DesktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        DesktopPath = desktopPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     }
 
     public string DesktopPath { get; }

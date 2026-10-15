@@ -185,7 +185,10 @@ public partial class BoxWindow : Window
         _zOrderTimer.Tick += (_, _) =>
         {
             RestoreIfShellHidTheBox();
-            KeepVisibleOnDesktop();
+
+            // 安全网：只请求 App 统一巡检（一次巡检最多压一次桌面），
+            // 不再每个盒子各压一次，免得点任务栏时一串 SetWindowPos 把整屏重排成闪烁。
+            App.RequestDesktopSweep();
         };
         _zOrderTimer.Start();
 
@@ -222,7 +225,14 @@ public partial class BoxWindow : Window
                 source.AddHook(WndProc);
             }
         };
-        Deactivated += (_, _) => PushDown();
+        Deactivated += (_, _) =>
+        {
+            // 点任务栏 / 开始菜单 / 任务栏缩略图导致的失焦不动 z 序：这类前台变化没有盖住盒子，压底只会闪一下
+            if (!NativeMethods.IsShellTrayWindow(NativeMethods.GetForegroundWindow()))
+            {
+                PushDown();
+            }
+        };
         Loaded += (_, _) => { FitContentHeight(); UpdateClip(); };
 
         LocationChanged += (_, _) => SchedulePersist();
@@ -281,7 +291,7 @@ public partial class BoxWindow : Window
     /// </summary>
     internal void RestoreIfShellHidTheBox()
     {
-        if (!_wantVisible || _dragging || _exiting)
+        if (!_wantVisible || DesktopInteractionActive || _exiting)
         {
             return;
         }
@@ -315,56 +325,97 @@ public partial class BoxWindow : Window
     }
 
     private bool _restoreLogged;
-    private bool _raisedLogged;
-    private DateTime _lastDesktopPush = DateTime.MinValue;
+
+    /// <summary>上一次真正压底的时间：盒子已经在底层时再来一次 SetWindowPos 只会引发重排/闪烁。</summary>
+    private DateTime _lastPushDown = DateTime.MinValue;
     private bool _exiting;
 
+    /// <summary>正在拖拽的盒子数：拖拽中间不抢 z 序（所有盒子都等拖拽结束后的安全网巡检）。</summary>
+    private static int _dragCount;
+
+    /// <summary>当前有没有盒子正在拖拽。</summary>
+    internal static bool AnyDragging => _dragCount > 0;
+
+    // 外部 Explorer 拖入也要保护：它不会经过本进程的 DoDragDrop。
+    internal static bool DesktopInteractionActive => AnyDragging || NativeMethods.IsLeftMouseButtonDown();
+
+    /// <summary>这个盒子窗口的 HWND（窗口还没创建时是 Zero）。</summary>
+    internal IntPtr BoxHandle => new WindowInteropHelper(this).Handle;
+
     /// <summary>
-    /// 按 Win+D（显示桌面）时，系统会把桌面窗口提到盒子上面，盒子因此被盖住
-    /// （看起来就是"盒子连同图标一起消失了"）。盒子已经贴着 z 序底部、受 z 序带次限制，
-    /// 抬高自己没有用（实测抬不动），所以这里反过来把桌面窗口压回最底层；
-    /// 桌面退出前台、没有压住盒子时，再把盒子压回"桌面之上、普通窗口之下"。
+    /// 盒子内容区里的采样点（物理像素、屏幕坐标）：中心 + 上下左右各 1/4 处。
+    /// 用内容区而不是窗口矩形，是为了不把 12px 投影留白算进去。
+    /// </summary>
+    internal IReadOnlyList<POINT> ContentSamplePoints()
+    {
+        var handle = BoxHandle;
+        if (handle == IntPtr.Zero || !NativeMethods.GetWindowRect(handle, out var rect))
+        {
+            return Array.Empty<POINT>();
+        }
+
+        // GetWindowRect 是物理像素；投影留白 ShadowPad 是 DIP，按窗口 DPI 换算
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var padX = (int)Math.Round(ShadowPad * dpi.DpiScaleX);
+        var padY = (int)Math.Round(ShadowPad * dpi.DpiScaleY);
+
+        var left = rect.Left + padX;
+        var top = rect.Top + padY;
+        var right = rect.Right - padX;
+        var bottom = rect.Bottom - padY;
+
+        if (right - left < 8 || bottom - top < 8)
+        {
+            // 盒子小到留白都占满时（收起状态），退回整个窗口矩形
+            left = rect.Left;
+            right = rect.Right;
+            top = rect.Top;
+            bottom = rect.Bottom;
+        }
+
+        var cx = (left + right) / 2;
+        var cy = (top + bottom) / 2;
+        var dx = Math.Max(2, (right - left) / 4);
+        var dy = Math.Max(2, (bottom - top) / 4);
+
+        return new[]
+        {
+            new POINT(cx, cy),
+            new POINT(cx - dx, cy),
+            new POINT(cx + dx, cy),
+            new POINT(cx, cy - dy),
+            new POINT(cx, cy + dy),
+        };
+    }
+
+    /// <summary>
+    /// 这个盒子当前是不是真的被桌面窗口盖住（只读判定，不动 z 序）。
+    /// 只看"桌面在前台"是不够的：盒子好好盖在桌面之上时桌面也会在前台，
+    /// 那时候去动 z 序只是白白重排一遍分层窗口（看起来就是闪一下）。
+    /// 判定要求内容区里的采样点全部命中桌面窗口；拖拽中间一律不算。
+    /// </summary>
+    internal bool IsCoveredByDesktopNow()
+    {
+        if (_exiting || !_wantVisible || DesktopInteractionActive)
+        {
+            return false;
+        }
+
+        return NativeMethods.IsCoveredByDesktop(ContentSamplePoints());
+    }
+
+    /// <summary>
+    /// 请求一次"桌面保持"巡检：把判断和动作都交给 App 统一做（防抖 + 限流，一次巡检每个盒子至多动一次）。
+    ///
+    /// 按 Win+D（显示桌面）或拖拽时，资源管理器会把桌面窗口提到盒子上面，盒子因此被盖住
+    /// （看起来就是"盒子连同图标一起消失了"）。恢复方式是**把被盖住的盒子插回桌面之上**，
+    /// 不再去改桌面窗口的 z 序——改桌面会触发整屏重绘（所有格子闪一下）。
+    /// 只有插不回去（退化路径）时才会把桌面压回底层。
+    /// 单纯"桌面在前台 / 焦点切走"不算被盖住，不产生任何 z 序动作。
     /// </summary>
     internal void KeepVisibleOnDesktop()
     {
-        if (_exiting || !_wantVisible || _dragging)
-        {
-            return;
-        }
-
-        var handle = new WindowInteropHelper(this).Handle;
-        if (handle == IntPtr.Zero)
-        {
-            return;
-        }
-
-        if (!NativeMethods.DesktopIsForeground() && !NativeMethods.IsCoveredByDesktop(handle))
-        {
-            _raisedLogged = false;
-
-            if (!IsActive && IsVisible)
-            {
-                PushDown();
-            }
-
-            return;
-        }
-
-        NativeMethods.PushDesktopToBottom();
-
-        // 桌面可能被系统反复提起，这里只在"隔了一阵又发生"时记一条，免得刷日志
-        if (!_raisedLogged || DateTime.UtcNow - _lastDesktopPush > TimeSpan.FromSeconds(30))
-        {
-            _raisedLogged = true;
-            _lastDesktopPush = DateTime.UtcNow;
-
-            NativeMethods.GetWindowRect(handle, out var rect);
-            var center = new POINT(rect.Left + (rect.Right - rect.Left) / 2, rect.Top + (rect.Bottom - rect.Top) / 2);
-
-            Log.Info(
-                $"桌面挡住盒子「{_box.Title}」（桌面在前台={NativeMethods.DesktopIsForeground()}，" +
-                $"中心命中={NativeMethods.ClassNameOf(NativeMethods.WindowFromPoint(center))}），已把桌面压回最底层。");
-        }
+        App.RequestDesktopSweep();
     }
 
     private void UpdateClip()
@@ -475,8 +526,25 @@ public partial class BoxWindow : Window
         Actions.Opacity = target;
     }
 
+    /// <summary>
+    /// 把盒子压回"桌面之上、普通窗口之下"。
+    /// 300ms 内不重复压：窗口本来就在底层时再压一次，只会让分层窗口重排一遍（看起来就是闪一下）。
+    /// </summary>
     private void PushDown()
     {
+        if (_exiting || !_wantVisible || DesktopInteractionActive)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (now - _lastPushDown < TimeSpan.FromMilliseconds(300))
+        {
+            return;
+        }
+
+        _lastPushDown = now;
+
         try
         {
             NativeMethods.PushToBottom(new WindowInteropHelper(this).Handle);
@@ -493,6 +561,8 @@ public partial class BoxWindow : Window
     private void StopShowing()
     {
         _exiting = true;
+        EndMove();
+        if (_resizeDirection.Length > 0) EndResize();
         _zOrderTimer?.Stop();
         _persistTimer?.Stop();
         _reloadTimer?.Stop();
@@ -598,17 +668,42 @@ public partial class BoxWindow : Window
         // 用户手动拖出来的顺序优先，没记录过的（新放进来的）按上面的默认规则排在后面
         paths = ItemOrder.Sort(paths, _box.ItemOrder, Path.GetFileName);
 
-        _items.Clear();
+        // 复用现有条目和容器：重复的文件监视事件不能先清空整个盒子再重建。
+        var existing = _items.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        var wanted = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+        for (var i = _items.Count - 1; i >= 0; i--)
+            if (!wanted.Contains(_items[i].Path)) _items.RemoveAt(i);
         var size = (int)_config.IconSize;
 
-        foreach (var path in paths)
+        // 已经取过的图标先同步铺上（刷新时不会先闪一下占位图），没命中的再交给后台加载器
+        for (var index = 0; index < paths.Count; index++)
         {
+            var path = paths[index];
+            if (existing.TryGetValue(path, out var current))
+            {
+                var previous = _items.IndexOf(current);
+                if (previous != index) _items.Move(previous, index);
+                if (current.RefreshFileState(size) || ReferenceEquals(current.Icon, IconCache.Placeholder(size)))
+                    _ = LoadIconAsync(current);
+                continue;
+            }
+
             var item = new BoxItem(path, size) { IsSelected = selected.Contains(path) };
-            _items.Add(item);
+            var cached = IconCache.TryGetFast(path, size);
+            if (cached is not null)
+            {
+                item.Icon = cached;
+            }
+
+            _items.Insert(index, item);
             _ = LoadIconAsync(item);
         }
 
         EmptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        // 自愈：盒子里已经有指向系统项的快捷方式（回收站/控制面板/网络…）时，把桌面那一份也隐藏掉
+        SystemIconGuard.EnsureHidden(paths);
+
         FitContentHeight();
     }
 
@@ -650,7 +745,8 @@ public partial class BoxWindow : Window
 
     private void Box_DragEnter(object sender, DragEventArgs e)
     {
-        var ok = e.Data.GetDataPresent(DataFormats.FileDrop);
+        // 除了文件，也接受资源管理器拖过来的系统项（回收站 / 控制面板 / 网络…）
+        var ok = ShellDrop.CanAccept(e.Data);
         e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
         DropHighlight.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
         e.Handled = true;
@@ -659,7 +755,7 @@ public partial class BoxWindow : Window
     /// <summary>拖动经过时除了高亮整个盒子，还标出「会落到第几条前面」。</summary>
     private void Box_DragOver(object sender, DragEventArgs e)
     {
-        var ok = e.Data.GetDataPresent(DataFormats.FileDrop);
+        var ok = ShellDrop.CanAccept(e.Data);
         e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
         DropHighlight.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
         ShowInsertMark(ok ? InsertIndexFor(e.GetPosition(ItemsHost)) : -1);
@@ -685,19 +781,29 @@ public partial class BoxWindow : Window
 
     /// <summary>
     /// 落到这个盒子上：盒内拖动 = 调整顺序（不碰磁盘），跨盒子 / 从外面拖 = 搬进来并放到落点位置。
+    /// 回收站 / 控制面板 / 网络这类系统图标没有磁盘路径，会在盒子目录里落成一个指向它的 .lnk。
     /// </summary>
     internal void HandleDrop(IDataObject data, int insertIndex)
     {
-        if (data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0)
+        var items = ShellDrop.Read(data);
+        if (items.Count == 0)
         {
-            Log.Warn("拖动落点：没有拿到文件列表，忽略。");
+            Log.Warn("拖动落点：没有拿到文件或系统项，忽略。");
             return;
         }
 
-        Log.Info($"拖动落点：{paths.Length} 项 → 「{_box.Title}」第 {insertIndex} 位");
+        var paths = items
+            .Where(item => !string.IsNullOrEmpty(item.FileSystemPath))
+            .Select(item => item.FileSystemPath!)
+            .ToList();
+
+        var shellItems = items.Where(item => string.IsNullOrEmpty(item.FileSystemPath)).ToList();
+
+        Log.Info($"拖动落点：{items.Count} 项（文件 {paths.Count} / 系统项 {shellItems.Count}）→ 「{_box.Title}」第 {insertIndex} 位");
 
         // 同一个盒子内部拖动：只调整显示顺序，磁盘上的文件不动
-        if (data.GetDataPresent(BoxDragFormat) &&
+        if (shellItems.Count == 0 &&
+            data.GetDataPresent(BoxDragFormat) &&
             data.GetData(BoxDragFormat) is string sourceFolder &&
             IsSameFolder(sourceFolder, Folder))
         {
@@ -713,7 +819,31 @@ public partial class BoxWindow : Window
             return;
         }
 
-        MoveIntoBoxAt(paths, insertIndex);
+        // 系统项没法 Move，只能在盒子目录里建快捷方式；建好的 .lnk 和外部文件走同一条入盒路径
+        var createdLinks = new List<string>();
+        var hiddenNames = new List<string>();
+        foreach (var item in shellItems)
+        {
+            try
+            {
+                var link = ShortcutFactory.CreateInFolder(Folder, item.ParsingName, item.DisplayName);
+                paths.Add(link);
+                createdLinks.Add(link);
+                hiddenNames.Add(item.ParsingName);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"系统项入盒失败 {item.DisplayName}: {ex.Message}");
+            }
+        }
+
+        if (hiddenNames.Count > 0 && DesktopSystemIcon.SetHidden(hiddenNames, true))
+            SystemIconGuard.RememberHandled(createdLinks, hiddenNames);
+
+        if (paths.Count > 0)
+        {
+            MoveIntoBoxAt(paths, insertIndex);
+        }
     }
 
     private void ClearDropFeedback()
@@ -908,6 +1038,7 @@ public partial class BoxWindow : Window
         data.SetData(DataFormats.FileDrop, paths);
         data.SetData(BoxDragFormat, Folder);
         _dragging = true;
+        _dragCount++;
         try
         {
             DragDrop.DoDragDrop(ItemsHost, data, DragDropEffects.Move | DragDropEffects.Copy);
@@ -919,10 +1050,14 @@ public partial class BoxWindow : Window
         finally
         {
             _dragging = false;
+            _dragCount--;
             _dragOrigin = null;
         }
 
         ReloadItems();
+
+        // 拖拽中间不抢 z 序；拖完立刻请求一次巡检，好让被桌面盖住的盒子尽快回来
+        App.RequestDesktopSweep();
     }
 
     #endregion
@@ -1078,6 +1213,9 @@ public partial class BoxWindow : Window
 
             foreach (var path in paths)
             {
+                // 系统项：先把桌面那一份放回来，再把盒子里的 .lnk 删掉
+                TryRestoreHiddenDesktopIcon(path);
+
                 if (!NativeMethods.DeleteToRecycleBin(path))
                 {
                     Log.Warn($"删除失败 {path}");
@@ -1132,6 +1270,17 @@ public partial class BoxWindow : Window
         {
             try
             {
+                // 系统项的 .lnk：把桌面图标放回来就够了，这个 .lnk 不能再挪到桌面，否则又是两套
+                if (TryRestoreHiddenDesktopIcon(path))
+                {
+                    if (!NativeMethods.DeleteToRecycleBin(path))
+                    {
+                        Log.Warn($"系统项快捷方式删除失败 {path}");
+                    }
+
+                    continue;
+                }
+
                 FsUtil.MoveInto(path, _shell.DesktopPath);
             }
             catch (Exception ex)
@@ -1141,6 +1290,28 @@ public partial class BoxWindow : Window
         }
 
         ReloadItems();
+    }
+
+    /// <summary>
+    /// 盒子里的 .lnk 如果指向 shell 命名空间项（回收站 / 控制面板 / 网络 / 此电脑），
+    /// 说明它对应的桌面图标当初被入盒时隐藏了，这里把它恢复出来；返回是否属于这种情况。
+    /// </summary>
+    private static bool TryRestoreHiddenDesktopIcon(string path)
+    {
+        if (!path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!ShortcutFactory.TryGetTargetParsingName(path, out var parsingName) ||
+            !DesktopSystemIcon.TryGetClsid(parsingName, out var clsid))
+        {
+            return false;
+        }
+
+        if (!SystemIconGuard.Restore(path, parsingName)) return false;
+        Log.Info($"系统图标移出盒子：{Path.GetFileName(path)} → 已恢复桌面图标 {clsid}");
+        return true;
     }
 
     private void RenameItem(string path)
@@ -1338,6 +1509,7 @@ public partial class BoxWindow : Window
         }
 
         _moving = true;
+        _dragCount++;
         _moveStart = start;
         _moveOrigin = ScreenBounds;
 
@@ -1430,6 +1602,7 @@ public partial class BoxWindow : Window
         }
 
         _moving = false;
+        _dragCount--;
         MouseMove -= Box_MoveMove;
         MouseLeftButtonUp -= Box_MoveUp;
         LostMouseCapture -= Box_LostMouseCapture;
@@ -1469,6 +1642,8 @@ public partial class BoxWindow : Window
         {
             PersistGeometry();
         }
+
+        App.RequestDesktopSweep();
 
     }
 
@@ -1548,12 +1723,14 @@ public partial class BoxWindow : Window
 
     private void Resize_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (_box.Locked || e.ClickCount != 1)
+        if (_box.Locked || e.ClickCount != 1 || _resizeDirection.Length > 0)
         {
             return;
         }
 
         _resizeDirection = (sender as FrameworkElement)?.Tag as string ?? string.Empty;
+        if (_resizeDirection.Length == 0) return;
+        _dragCount++;
         _resizeStart = ScreenPoint(e.GetPosition(this));
         _resizeOrigin = ScreenBounds;
         MeasureResizeGrid();
@@ -1561,6 +1738,7 @@ public partial class BoxWindow : Window
         Mouse.Capture((IInputElement)sender);
         MouseMove += Resize_MouseMove;
         MouseLeftButtonUp += Resize_MouseLeftButtonUp;
+        LostMouseCapture += Resize_LostMouseCapture;
     }
 
     private void Resize_MouseMove(object sender, MouseEventArgs e)
@@ -1615,12 +1793,17 @@ public partial class BoxWindow : Window
 
     private void Resize_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => EndResize();
 
+    private void Resize_LostMouseCapture(object sender, MouseEventArgs e) => EndResize();
+
     private void EndResize()
     {
+        if (_resizeDirection.Length == 0) return;
+        _dragCount--;
         MouseMove -= Resize_MouseMove;
         MouseLeftButtonUp -= Resize_MouseLeftButtonUp;
-        Mouse.Capture(null);
+        LostMouseCapture -= Resize_LostMouseCapture;
         _resizeDirection = string.Empty;
+        Mouse.Capture(null);
 
         // 拉大盒子时右 / 下边缘可能出屏，收尾把整个盒子挪回屏幕内
         var current = ContentBox;
@@ -1633,6 +1816,7 @@ public partial class BoxWindow : Window
 
         _suppressPersist = false;
         PersistGeometry();
+        App.RequestDesktopSweep();
     }
 
     private Point ScreenPoint(Point windowPoint)

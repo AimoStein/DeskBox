@@ -12,6 +12,7 @@ public sealed class BoxItem : INotifyPropertyChanged
     private BitmapSource? _icon;
     private bool _selected;
     private bool _insertMark;
+    private string? _iconKey;
 
     public BoxItem(string path, int iconSize)
     {
@@ -19,7 +20,7 @@ public sealed class BoxItem : INotifyPropertyChanged
         Name = DisplayName(path);
 
         IsDirectory = Directory.Exists(path);
-        ApplyIconSize(iconSize);
+        RefreshFileState(iconSize);
         Icon = IconCacheHolder.Placeholder(iconSize);
     }
 
@@ -70,6 +71,16 @@ public sealed class BoxItem : INotifyPropertyChanged
         Raise(nameof(IconSize));
         Raise(nameof(ItemWidth));
         Raise(nameof(ItemHeight));
+        return true;
+    }
+
+    internal bool RefreshFileState(int size)
+    {
+        var resized = ApplyIconSize(size);
+        var key = DeskBox.Services.IconLoader.BuildKey(Path, size);
+        if (key == _iconKey) return resized;
+        _iconKey = key;
+        Raise(nameof(Meta));
         return true;
     }
 

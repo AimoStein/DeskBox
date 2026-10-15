@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using DeskBox.Models;
@@ -189,9 +190,18 @@ public static class SelfTest
             // 盒子窗口要用到主题画刷；正常启动时由 App 先调用，这里补上
             ThemeManager.Apply(ThemeMode.System);
 
-            var shell = new DesktopShell();
+            var shell = new DesktopShell(desktop);
             windows.Add(new BoxWindow(layoutConfig, configA, shell, Peers) { ShowActivated = false });
             windows.Add(new BoxWindow(layoutConfig, configB, shell, Peers) { ShowActivated = false });
+
+            windows[0].BeginMove(null, new Point(1000, 400));
+            windows[1].BeginMove(null, new Point(1000, 400));
+            Check("防闪烁-移动格子期间暂停所有盒子的层级巡检", BoxWindow.AnyDragging);
+            windows[0].EndMove();
+            windows[0].EndMove();
+            Check("防闪烁-重复结束移动不影响另一个格子的保护", BoxWindow.AnyDragging);
+            windows[1].EndMove();
+            Check("防闪烁-全部移动结束后恢复巡检", !BoxWindow.AnyDragging);
 
             void Drag(BoxWindow window, double x, double y)
             {
@@ -299,6 +309,17 @@ public static class SelfTest
             windows[0].ReloadItems();
             Check("拖动-盒子内容已就绪", string.Join(",", windows[0].ItemNames) == "a.txt,b.txt,c.txt",
                 string.Join(",", windows[0].ItemNames));
+
+            var retainedItems = windows[0].ItemsHost.Items.Cast<BoxItem>().ToArray();
+            retainedItems[0].IsSelected = true;
+            windows[0].ReloadItems();
+            Check("防闪烁-重复刷新保留图标条目和选择状态",
+                windows[0].ItemsHost.Items.Cast<BoxItem>().SequenceEqual(retainedItems) && retainedItems[0].IsSelected);
+            var firstFile = Path.Combine(folderA, "a.txt");
+            File.WriteAllText(firstFile, "updated file");
+            windows[0].ReloadItems();
+            Check("防闪烁-文件变化时保留条目并刷新文件信息",
+                ReferenceEquals(windows[0].ItemsHost.Items[0], retainedItems[0]) && retainedItems[0].Meta.Contains("12 B"));
 
             var moveInside = new DataObject();
             moveInside.SetData(DataFormats.FileDrop, new[] { Path.Combine(folderA, "c.txt") });
@@ -439,6 +460,626 @@ public static class SelfTest
             windows[1].KeepVisibleOnDesktop(); // 没有窗口句柄时必须安全退出，不能抛异常
             Check("前台变化处理-可安全调用", true);
 
+            // 18) 系统图标（控制面板 / 回收站 / 网络）拖进盒子：解析 Shell IDList Array 并建 .lnk
+            // 资源管理器拖系统图标时给的是 CFSTR_SHELLIDLIST，没有文件路径。
+            // 这里自己拼一个 CIDA + DataObject，把「资源管理器拖放」这条真实路径离线跑通。
+            const string recycleBinClsid = Interop.ShellItemInterop.RecycleBinParsingName;
+
+            // PIDL 字节一律「拿到就立刻拷出来」，不长期持有 shell 的 PIDL 指针
+            byte[] ToBuffer(IntPtr pidl)
+            {
+                var size = Interop.ShellItemInterop.PidlSize(pidl);
+                if (size <= 0)
+                {
+                    Log.Warn($"自检提示：PIDL 长度不合法（{size}），该用例跳过。");
+                    return Array.Empty<byte>();
+                }
+
+                var bytes = new byte[size];
+                Marshal.Copy(pidl, bytes, 0, size);
+                return bytes;
+            }
+
+            // SHParseDisplayName 偶尔会给出一个走不到结尾的 PIDL（shell 命名空间项缓存有生命周期，
+            // 实测约 1/5 概率），这时重试几次即可。
+            // 真实拖放走的是 CIDA 字节流（PidlAt 按缓冲区边界拷贝），不受这个影响。
+            byte[] ParsePidlBytes(string parsingName)
+            {
+                for (var attempt = 1; attempt <= 5; attempt++)
+                {
+                    var pidl = Interop.ShellItemInterop.ParseDisplayName(parsingName);
+                    if (pidl == IntPtr.Zero)
+                    {
+                        Log.Warn($"自检提示：{parsingName} 第 {attempt} 次拿不到 PIDL");
+                        continue;
+                    }
+
+                    var bytes = ToBuffer(pidl);
+
+                    if (bytes.Length == 0)
+                    {
+                        // 把前 16 字节记下来，便于判断到底拿到了什么
+                        var head = new StringBuilder();
+                        try
+                        {
+                            for (var i = 0; i < 16; i++)
+                            {
+                                head.Append(Marshal.ReadByte(pidl, i).ToString("X2")).Append(' ');
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            head.Append("读不出来：" + ex.Message);
+                        }
+
+                        Interop.ShellItemInterop.FreePidl(pidl);
+                        Log.Warn($"自检提示：{parsingName} 第 {attempt} 次 PIDL 长度不合法，前 16 字节 = {head}");
+                        continue;
+                    }
+
+                    Interop.ShellItemInterop.FreePidl(pidl);
+                    return bytes;
+                }
+
+                return Array.Empty<byte>();
+            }
+
+            // 按 CIDA 结构拼字节：DWORD cidl; DWORD aoffset[cidl + 1]; 然后是各个 PIDL。
+            // aoffset[0] 留给父文件夹 PIDL，aoffset[1..cidl] 才是每个条目，顺序不能错。
+            byte[] BuildCida(byte[] parent, params byte[][] items)
+            {
+                var headerSize = 4 + ((items.Length + 1) * 4);
+                var total = headerSize + parent.Length + items.Sum(bytes => bytes.Length);
+                var buffer = new byte[total];
+
+                BitConverter.GetBytes((uint)items.Length).CopyTo(buffer, 0);
+
+                var cursor = headerSize;
+
+                // aoffset[0] = 父文件夹；没有父 PIDL 时保持 0
+                if (parent.Length > 0)
+                {
+                    BitConverter.GetBytes((uint)cursor).CopyTo(buffer, 4);
+                    parent.CopyTo(buffer, cursor);
+                    cursor += parent.Length;
+                }
+
+                // aoffset[1..cidl] = 每个条目
+                for (var i = 0; i < items.Length; i++)
+                {
+                    BitConverter.GetBytes((uint)cursor).CopyTo(buffer, 8 + (i * 4));
+                    items[i].CopyTo(buffer, cursor);
+                    cursor += items[i].Length;
+                }
+
+                return buffer;
+            }
+
+            using (Interop.ShellItemInterop.EnsureComInitialized())
+            {
+                Check("拖放-空数据不接受", !ShellDrop.CanAccept(null) && !ShellDrop.CanAccept(new DataObject()));
+
+                var probePidl = Interop.ShellItemInterop.ParseDisplayName(recycleBinClsid);
+                Check("拖放-能解析回收站的命名空间 PIDL", probePidl != IntPtr.Zero, recycleBinClsid);
+                Interop.ShellItemInterop.FreePidl(probePidl);
+
+                // 拿到字节后立刻释放 PIDL，后面只用字节，避免长期持有 shell 的指针
+                var recycleBytes = ParsePidlBytes(recycleBinClsid);
+                Check("拖放-回收站 PIDL 长度合法", recycleBytes.Length > 0, $"{recycleBytes.Length} 字节");
+
+                if (recycleBytes.Length > 0)
+                {
+                    var shellData = new DataObject();
+                    shellData.SetData(
+                        Interop.ShellItemInterop.ShellIdListArrayFormat,
+                        new MemoryStream(BuildCida(Array.Empty<byte>(), recycleBytes)));
+
+                    Check("拖放-接受 Shell IDList Array", ShellDrop.CanAccept(shellData));
+
+                    var parsed = ShellDrop.Read(shellData);
+                    Check("拖放-系统图标解析出 1 项", parsed.Count == 1, $"共 {parsed.Count} 项");
+
+                    if (parsed.Count == 1)
+                    {
+                        var item = parsed[0];
+                        Check("拖放-回收站没有文件路径", string.IsNullOrEmpty(item.FileSystemPath));
+                        Check("拖放-解析名含 645FF040",
+                            item.ParsingName.Contains("645FF040", StringComparison.OrdinalIgnoreCase),
+                            item.ParsingName);
+                        Check("拖放-显示名非空", !string.IsNullOrWhiteSpace(item.DisplayName), item.DisplayName);
+                    }
+
+                    var shortcutDir = Path.Combine(sandbox, "系统图标盒子");
+                    Directory.CreateDirectory(shortcutDir);
+                    var lnk = ShortcutFactory.CreateInFolder(shortcutDir, recycleBinClsid, "回收站");
+                    Check("快捷方式-文件已生成", File.Exists(lnk), lnk);
+                    Check("快捷方式-扩展名是 .lnk",
+                        Path.GetExtension(lnk).Equals(".lnk", StringComparison.OrdinalIgnoreCase),
+                        Path.GetExtension(lnk));
+                    Check("快捷方式-落点就在盒子目录里",
+                        string.Equals(Path.GetDirectoryName(lnk), shortcutDir, StringComparison.OrdinalIgnoreCase),
+                        Path.GetDirectoryName(lnk) ?? string.Empty);
+
+                    // 用 IShellLink + IPersistFile 读回，验证存进去的就是同一个 CLSID 解析名
+                    var readBack = Interop.ShellItemInterop.CreateShellLink();
+                    try
+                    {
+                        var persist = (Interop.ShellItemInterop.IPersistFile)readBack;
+                        var hr = persist.Load(lnk, 0);
+                        Check("快捷方式-IPersistFile.Load 成功", hr == 0, $"hr=0x{hr:X8}");
+
+                        if (hr == 0 && readBack.GetIDList(out var readPidl) == 0 && readPidl != IntPtr.Zero)
+                        {
+                            try
+                            {
+                                var name = Interop.ShellItemInterop.GetName(
+                                    readPidl, Interop.ShellItemInterop.SIGDN.DESKTOPABSOLUTEPARSING);
+                                Check("快捷方式-读回同一个 CLSID 解析名",
+                                    name is not null &&
+                                    name.Contains("645FF040", StringComparison.OrdinalIgnoreCase),
+                                    name ?? "（空）");
+                            }
+                            finally
+                            {
+                                Interop.ShellItemInterop.FreePidl(readPidl);
+                            }
+                        }
+                        else
+                        {
+                            Check("快捷方式-能读回目标 IDList", false, "GetIDList 拿不到 PIDL");
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(readBack);
+                    }
+
+                    // 重名：同一个显示名第二次入盒要加 " (2)"，不能覆盖
+                    var lnk2 = ShortcutFactory.CreateInFolder(shortcutDir, recycleBinClsid, "回收站");
+                    Check("快捷方式-重名不覆盖", File.Exists(lnk2) && !string.Equals(lnk2, lnk, StringComparison.OrdinalIgnoreCase),
+                        Path.GetFileName(lnk2));
+
+                    // .lnk 的图标交给 shell 解析（此时可能有别人在改 IconCache，失败只记日志不算 FAIL）
+                    try
+                    {
+                        var icon = IconCache.Get(lnk, 48);
+                        if (icon is null)
+                        {
+                            Log.Warn("自检提示：.lnk 图标暂时解析不出来（不算失败）");
+                        }
+                        else
+                        {
+                            Check("快捷方式-图标可解析", icon.PixelWidth > 0, $"{icon.PixelWidth}px");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn($"自检提示：.lnk 图标解析跳过 — {ex.Message}");
+                    }
+                }
+
+                // 一次拖多个系统图标：CIDA 里放多个条目，每项都要能认出来（真实拖放里最常见的就是多个）
+                var multiBytes = new[]
+                {
+                    ParsePidlBytes(Interop.ShellItemInterop.NetworkParsingName),
+                    ParsePidlBytes(Interop.ShellItemInterop.ControlPanelParsingName),
+                };
+
+                if (multiBytes.All(bytes => bytes.Length > 0))
+                {
+                    var multiData = new DataObject();
+                    multiData.SetData(
+                        Interop.ShellItemInterop.ShellIdListArrayFormat,
+                        new MemoryStream(BuildCida(Array.Empty<byte>(), multiBytes)));
+
+                    var multi = ShellDrop.Read(multiData);
+                    Check("拖放-多个系统图标解析出 2 项", multi.Count == 2, $"共 {multi.Count} 项");
+                    Check("拖放-第 1 个是网络",
+                        multi.Count == 2 && multi[0].ParsingName.Contains("F02C1A0D", StringComparison.OrdinalIgnoreCase),
+                        multi.Count == 2 ? multi[0].ParsingName : "（空）");
+                    Check("拖放-第 2 个是控制面板",
+                        multi.Count == 2 && multi[1].ParsingName.Contains("21EC2020", StringComparison.OrdinalIgnoreCase),
+                        multi.Count == 2 ? multi[1].ParsingName : "（空）");
+                    Check("拖放-多图标都有显示名",
+                        multi.Count == 2 && multi.All(m => !string.IsNullOrWhiteSpace(m.DisplayName)),
+                        multi.Count == 2 ? string.Join("、", multi.Select(m => m.DisplayName)) : "（空）");
+
+                    var networkLnk = ShortcutFactory.CreateInFolder(
+                        Path.Combine(sandbox, "系统图标盒子"), multi[0].ParsingName, multi[0].DisplayName);
+                    Check("快捷方式-网络项也能建 .lnk", File.Exists(networkLnk), Path.GetFileName(networkLnk));
+                }
+                else
+                {
+                    Log.Warn("自检提示：网络 / 控制面板 PIDL 拿不到，多图标用例跳过。");
+                }
+
+                // 普通文件仍然走真实路径语义，不许变成快捷方式
+                var realFile = Path.Combine(sandbox, "拖放普通文件.txt");
+                File.WriteAllText(realFile, "x");
+                var fileData = new DataObject();
+                fileData.SetData(DataFormats.FileDrop, new[] { realFile });
+                var fileItems = ShellDrop.Read(fileData);
+                Check("拖放-普通文件仍是真实路径",
+                    fileItems.Count == 1 &&
+                    string.Equals(fileItems[0].FileSystemPath, realFile, StringComparison.OrdinalIgnoreCase),
+                    fileItems.Count == 1 ? fileItems[0].FileSystemPath ?? "（空）" : $"共 {fileItems.Count} 项");
+                Check("拖放-普通文件显示名带扩展名",
+                    fileItems.Count == 1 && fileItems[0].DisplayName == "拖放普通文件.txt",
+                    fileItems.Count == 1 ? fileItems[0].DisplayName : "（空）");
+
+                // 资源管理器拖真实文件时两种格式都会给：FileDrop + Shell IDList Array。
+                // 这种必须只算一项，而且仍然走真实路径语义，绝不能变成快捷方式。
+                var mixedBytes = ParsePidlBytes(realFile);
+
+                if (mixedBytes.Length > 0)
+                {
+                    var mixedData = new DataObject();
+                    mixedData.SetData(DataFormats.FileDrop, new[] { realFile });
+                    mixedData.SetData(
+                        Interop.ShellItemInterop.ShellIdListArrayFormat,
+                        new MemoryStream(BuildCida(Array.Empty<byte>(), mixedBytes)));
+
+                    var mixed = ShellDrop.Read(mixedData);
+                    Check("拖放-两种格式同时给只算一项", mixed.Count == 1, $"共 {mixed.Count} 项");
+                    Check("拖放-IDList 里的真实文件仍是真实路径",
+                        mixed.Count == 1 &&
+                        string.Equals(mixed[0].FileSystemPath, realFile, StringComparison.OrdinalIgnoreCase),
+                        mixed.Count == 1 ? mixed[0].FileSystemPath ?? "（空）" : "（空）");
+                }
+                else
+                {
+                    Log.Warn("自检提示：普通文件的解析名拿不到，混合格式用例跳过。");
+                }
+            }
+
+            // 18.5) 真实 shell IDataObject：和资源管理器拖动走完全同一条代码路径
+            // 手工拼的 CIDA 和 Explorer 真实给的不一样（真实给的末项 PIDL 没有结尾的 2 字节 0），
+            // 所以这里用桌面文件夹亲自生成 IDataObject，无鼠标、可重复。
+            using (Interop.ShellItemInterop.EnsureComInitialized())
+            {
+                var desktopFolder = Interop.ShellItemInterop.GetDesktopFolder();
+                var realShortcutDir = Path.Combine(sandbox, "真实系统图标盒子");
+                Directory.CreateDirectory(realShortcutDir);
+
+                var realCases = new[]
+                {
+                    (Label: "回收站", ParsingName: Interop.ShellItemInterop.RecycleBinParsingName, Clsid: "645FF040"),
+                    (Label: "网络", ParsingName: Interop.ShellItemInterop.NetworkParsingName, Clsid: "F02C1A0D"),
+                    (Label: "控制面板", ParsingName: Interop.ShellItemInterop.ControlPanelParsingName, Clsid: "21EC2020"),
+                };
+
+                // PIDL 长度算法必须和 shell 自己的 ILGetSize 一致，否则 CIDA 偏移全错
+                var sizeProbePidl = Interop.ShellItemInterop.ParseDisplayName(Interop.ShellItemInterop.RecycleBinParsingName);
+                try
+                {
+                    var mine = Interop.ShellItemInterop.PidlSize(sizeProbePidl);
+                    var shellSize = Interop.ShellItemInterop.GetPidlSizeByShell(sizeProbePidl);
+                    Check("真实拖放-PIDL 长度算法和 shell 一致", mine == shellSize && mine > 0, $"自己算={mine} shell 算={shellSize}");
+                }
+                finally
+                {
+                    Interop.ShellItemInterop.FreePidl(sizeProbePidl);
+                }
+
+                try
+                {
+                    foreach (var realCase in realCases)
+                    {
+                        var absPidl = Interop.ShellItemInterop.ParseDisplayName(realCase.ParsingName);
+                        try
+                        {
+                            var comObject = absPidl != IntPtr.Zero
+                                ? Interop.ShellItemInterop.CreateDataObject(desktopFolder, absPidl)
+                                : null;
+                            Check($"真实拖放-{realCase.Label} 能生成 IDataObject", comObject is not null);
+
+                            if (comObject is null)
+                            {
+                                continue;
+                            }
+
+                            // 1) 整条主路径：WPF DataObject 包装 → CanAccept → Read
+                            var realData = new DataObject(comObject);
+                            Check($"真实拖放-{realCase.Label} 盒子接受", ShellDrop.CanAccept(realData));
+
+                            var realItems = ShellDrop.Read(realData);
+                            Check($"真实拖放-{realCase.Label} 解析出 1 项", realItems.Count == 1, $"共 {realItems.Count} 项");
+
+                            if (realItems.Count == 1)
+                            {
+                                Check($"真实拖放-{realCase.Label} 没有文件路径",
+                                    string.IsNullOrEmpty(realItems[0].FileSystemPath));
+                                Check($"真实拖放-{realCase.Label} 解析名含 {realCase.Clsid}",
+                                    realItems[0].ParsingName.Contains(realCase.Clsid, StringComparison.OrdinalIgnoreCase),
+                                    realItems[0].ParsingName);
+                                Check($"真实拖放-{realCase.Label} 显示名非空",
+                                    !string.IsNullOrWhiteSpace(realItems[0].DisplayName), realItems[0].DisplayName);
+                            }
+
+                            // 2) 兜底路径：把 Explorer 的原始字节喂给手工 CIDA 解析
+                            var comTypes = comObject as System.Runtime.InteropServices.ComTypes.IDataObject;
+                            var rawBytes = comTypes is null
+                                ? null
+                                : Interop.ShellItemInterop.ReadGlobalBytes(
+                                    comTypes, Interop.ShellItemInterop.ShellIdListArrayFormat);
+                            Check($"真实拖放-{realCase.Label} 能读到原始 CIDA 字节",
+                                rawBytes is { Length: > 0 }, $"{rawBytes?.Length ?? 0} 字节");
+
+                            if (rawBytes is { Length: > 0 })
+                            {
+                                var rawData = new DataObject();
+                                rawData.SetData(
+                                    Interop.ShellItemInterop.ShellIdListArrayFormat,
+                                    new MemoryStream(rawBytes));
+
+                                var fallback = ShellDrop.Read(rawData);
+                                Check($"真实拖放-{realCase.Label} 兜底解析出 1 项",
+                                    fallback.Count == 1, $"共 {fallback.Count} 项");
+                                Check($"真实拖放-{realCase.Label} 兜底解析名含 {realCase.Clsid}",
+                                    fallback.Count == 1 &&
+                                    fallback[0].ParsingName.Contains(realCase.Clsid, StringComparison.OrdinalIgnoreCase),
+                                    fallback.Count == 1 ? fallback[0].ParsingName : "（空）");
+                            }
+
+                            // 3) 入盒：建 .lnk 并用 IShellLink 读回同一个 CLSID
+                            var lnk = ShortcutFactory.CreateInFolder(
+                                realShortcutDir,
+                                realCase.ParsingName,
+                                realItems.Count == 1 ? realItems[0].DisplayName : realCase.Label);
+                            Check($"真实拖放-{realCase.Label} 生成 .lnk", File.Exists(lnk), Path.GetFileName(lnk));
+
+                            var readBack = Interop.ShellItemInterop.CreateShellLink();
+                            try
+                            {
+                                var persist = (Interop.ShellItemInterop.IPersistFile)readBack;
+                                var hr = persist.Load(lnk, 0);
+
+                                if (hr == 0 && readBack.GetIDList(out var readPidl) == 0 && readPidl != IntPtr.Zero)
+                                {
+                                    try
+                                    {
+                                        var name = Interop.ShellItemInterop.GetName(
+                                            readPidl, Interop.ShellItemInterop.SIGDN.DESKTOPABSOLUTEPARSING);
+                                        Check($"真实拖放-{realCase.Label} .lnk 读回同一个 CLSID",
+                                            name is not null && name.Contains(realCase.Clsid, StringComparison.OrdinalIgnoreCase),
+                                            name ?? "（空）");
+                                    }
+                                    finally
+                                    {
+                                        Interop.ShellItemInterop.FreePidl(readPidl);
+                                    }
+                                }
+                                else
+                                {
+                                    Check($"真实拖放-{realCase.Label} .lnk 读回同一个 CLSID", false, $"Load hr=0x{hr:X8}");
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.ReleaseComObject(readBack);
+                            }
+                        }
+                        finally
+                        {
+                            Interop.ShellItemInterop.FreePidl(absPidl);
+                        }
+                    }
+
+                    // 4) 真实文件走同样办法取 IDataObject：必须仍然是真实路径
+                    var realFile = Path.Combine(sandbox, "真实对象普通文件.txt");
+                    File.WriteAllText(realFile, "x");
+
+                    var fileComObject = Interop.ShellItemInterop.CreateDataObjectFromParsingName(realFile);
+                    Check("真实拖放-普通文件能生成 IDataObject", fileComObject is not null);
+
+                    if (fileComObject is not null)
+                    {
+                        var realFileData = new DataObject(fileComObject);
+
+                        // 真实文件给的是 CF_HDROP（FileDrop）+ CFSTR_SHELLIDLIST，
+                        // 两条路都要能走通，而且合起来只能算一项、仍然是真实路径。
+                        var realFileItems = ShellDrop.Read(realFileData);
+
+                        // 只给 CIDA 字节（不走系统解析器）也必须能解析出同一个路径
+                        if (fileComObject is System.Runtime.InteropServices.ComTypes.IDataObject fileComTypes)
+                        {
+                            var fileRaw = Interop.ShellItemInterop.ReadGlobalBytes(
+                                fileComTypes, Interop.ShellItemInterop.ShellIdListArrayFormat);
+
+                            if (fileRaw is { Length: > 0 })
+                            {
+                                var onlyCida = new DataObject();
+                                onlyCida.SetData(
+                                    Interop.ShellItemInterop.ShellIdListArrayFormat,
+                                    new MemoryStream(fileRaw));
+
+                                var cidaOnlyItems = ShellDrop.Read(onlyCida);
+                                Check("真实拖放-普通文件兜底解析也是真实路径",
+                                    cidaOnlyItems.Count == 1 &&
+                                    string.Equals(cidaOnlyItems[0].FileSystemPath, realFile, StringComparison.OrdinalIgnoreCase),
+                                    cidaOnlyItems.Count == 1
+                                        ? cidaOnlyItems[0].FileSystemPath ?? "（空）"
+                                        : $"共 {cidaOnlyItems.Count} 项");
+                            }
+                        }
+
+                        Check("真实拖放-普通文件仍是真实路径",
+                            realFileItems.Count == 1 &&
+                            string.Equals(realFileItems[0].FileSystemPath, realFile, StringComparison.OrdinalIgnoreCase),
+                            $"共 {realFileItems.Count} 项：" + string.Join(
+                                " | ",
+                                realFileItems.Select(x => $"{x.FileSystemPath ?? "-"} / {x.ParsingName} / {x.DisplayName}")));
+                        Check("真实拖放-普通文件能读到 FileDrop",
+                            realFileData.GetDataPresent(DataFormats.FileDrop),
+                            string.Join(",", realFileData.GetData(DataFormats.FileDrop) as string[] ?? Array.Empty<string>()));
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(desktopFolder);
+                }
+            }
+
+            // 18.6) 系统图标隐藏：CLSID 解析 / 注册表往返（临时子键，绝不碰真实设置）/ .lnk 目标回读
+            const string tempKeyRoot = @"Software\DeskBox\SelfTest";
+            var tempNewStart = tempKeyRoot + @"\NewStartPanel";
+            var tempClassic = tempKeyRoot + @"\ClassicStartMenu";
+
+            try
+            {
+                Check("系统图标-回收站 CLSID 解析",
+                    DesktopSystemIcon.TryGetClsid(Interop.ShellItemInterop.RecycleBinParsingName, out var recycleClsid) &&
+                    recycleClsid == "{645FF040-5081-101B-9F08-00AA002F954E}",
+                    recycleClsid);
+
+                Check("系统图标-网络 CLSID 解析",
+                    DesktopSystemIcon.TryGetClsid(Interop.ShellItemInterop.NetworkParsingName, out var networkClsid) &&
+                    networkClsid == "{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}",
+                    networkClsid);
+
+                Check("系统图标-控制面板 CLSID 解析",
+                    DesktopSystemIcon.TryGetClsid(Interop.ShellItemInterop.ControlPanelParsingName, out var cplClsid) &&
+                    cplClsid == "{21EC2020-3AEA-1069-A2DD-08002B30309D}",
+                    cplClsid);
+
+                Check("系统图标-CLSID 大小写归一化",
+                    DesktopSystemIcon.TryGetClsid("::{645ff040-5081-101b-9f08-00aa002f954e}", out var lowerClsid) &&
+                    lowerClsid == "{645FF040-5081-101B-9F08-00AA002F954E}",
+                    lowerClsid);
+
+                Check("系统图标-非法解析名一律 false",
+                    !DesktopSystemIcon.TryGetClsid(null, out _) &&
+                    !DesktopSystemIcon.TryGetClsid(string.Empty, out _) &&
+                    !DesktopSystemIcon.TryGetClsid("C:\\Windows\\notepad.exe", out _) &&
+                    !DesktopSystemIcon.TryGetClsid("C:\\Apps\\{645FF040-5081-101B-9F08-00AA002F954E}\\app.exe", out _) &&
+                    !DesktopSystemIcon.TryGetClsid("::{这不是GUID}", out _));
+
+                // .lnk 目标回读：用的是真实系统图标快捷方式
+                var iconLnk = ShortcutFactory.CreateInFolder(
+                    Path.Combine(sandbox, "隐藏图标用例"),
+                    Interop.ShellItemInterop.RecycleBinParsingName,
+                    "回收站");
+
+                Check("系统图标-读回 .lnk 目标是同一个 CLSID",
+                    ShortcutFactory.TryGetTargetParsingName(iconLnk, out var lnkTarget) &&
+                    DesktopSystemIcon.TryGetClsid(lnkTarget, out var lnkClsid) &&
+                    lnkClsid == "{645FF040-5081-101B-9F08-00AA002F954E}",
+                    lnkTarget);
+
+                Check("系统图标-不存在的 .lnk 返回 false",
+                    !ShortcutFactory.TryGetTargetParsingName(Path.Combine(sandbox, "没有这个.lnk"), out _));
+
+                // 注册表往返只写临时子键，并把刷新关掉（自检不许动用户的桌面）
+                var oldNewKey = DesktopSystemIcon.NewStartPanelKey;
+                var oldClassicKey = DesktopSystemIcon.ClassicStartMenuKey;
+                var oldSuppress = DesktopSystemIcon.SuppressRefresh;
+
+                try
+                {
+                    DesktopSystemIcon.NewStartPanelKey = tempNewStart;
+                    DesktopSystemIcon.ClassicStartMenuKey = tempClassic;
+                    DesktopSystemIcon.SuppressRefresh = true;
+
+                    var systemNames = new[] { Interop.ShellItemInterop.RecycleBinParsingName,
+                        Interop.ShellItemInterop.NetworkParsingName, "::{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}" };
+                    Check("系统图标-批量隐藏回收站网络和实际控制面板 CLSID",
+                        DesktopSystemIcon.SetHidden(systemNames, true) && systemNames.All(DesktopSystemIcon.IsHidden));
+                    DesktopSystemIcon.SetHidden(systemNames, false);
+
+                    Check("系统图标-初始未隐藏", !DesktopSystemIcon.IsHidden(recycleClsid));
+
+                    DesktopSystemIcon.SetHidden(Interop.ShellItemInterop.RecycleBinParsingName, true);
+                    Check("系统图标-SetHidden 写进注册表", DesktopSystemIcon.IsHidden(recycleClsid));
+
+                    using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(tempNewStart))
+                    {
+                        var value = key?.GetValue(recycleClsid);
+                        Check("系统图标-注册表值名就是 {CLSID}、值为 DWORD 1",
+                            value is int number && number == 1,
+                            $"{recycleClsid}={value ?? "（无）"}");
+                    }
+
+                    using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(tempClassic))
+                    {
+                        var value = key?.GetValue(recycleClsid);
+                        Check("系统图标-ClassicStartMenu 子键也写了",
+                            value is int number && number == 1,
+                            $"{recycleClsid}={value ?? "（无）"}");
+                    }
+
+                    DesktopSystemIcon.SetHidden(Interop.ShellItemInterop.RecycleBinParsingName, false);
+                    Check("系统图标-恢复后注册表里不再隐藏", !DesktopSystemIcon.IsHidden(recycleClsid));
+
+                    using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(tempNewStart))
+                    {
+                        var value = key?.GetValue(recycleClsid);
+                        Check("系统图标-恢复显示写的是显式 0（不是删值）",
+                            value is int zero && zero == 0,
+                            $"{recycleClsid}={value?.ToString() ?? "（值被删了，实机上图标不会回来）"}");
+                    }
+
+                    // 走一遍 BoxWindow 的真实入盒接线：盒子里出现 .lnk + 临时注册表被置 1
+                    using (Interop.ShellItemInterop.EnsureComInitialized())
+                    {
+                        var boxDesktop = Interop.ShellItemInterop.GetDesktopFolder();
+                        var boxPidl = Interop.ShellItemInterop.ParseDisplayName(Interop.ShellItemInterop.RecycleBinParsingName);
+
+                        try
+                        {
+                            var boxCom = boxPidl != IntPtr.Zero
+                                ? Interop.ShellItemInterop.CreateDataObject(boxDesktop, boxPidl)
+                                : null;
+                            Check("系统图标-入盒用例能造出 IDataObject", boxCom is not null);
+
+                            if (boxCom is not null)
+                            {
+                                windows[1].HandleDrop(new DataObject(boxCom), 0);
+
+                                Check("系统图标-入盒接线在盒子里建了 .lnk",
+                                    windows[1].ItemNames.Any(name => name.StartsWith("回收站", StringComparison.Ordinal)),
+                                    string.Join(",", windows[1].ItemNames));
+                                Check("系统图标-入盒接线把桌面那一份标记为隐藏",
+                                    DesktopSystemIcon.IsHidden(recycleClsid));
+                            }
+                        }
+                        finally
+                        {
+                            Interop.ShellItemInterop.FreePidl(boxPidl);
+                            Marshal.ReleaseComObject(boxDesktop);
+                        }
+                    }
+                }
+                finally
+                {
+                    DesktopSystemIcon.NewStartPanelKey = oldNewKey;
+                    DesktopSystemIcon.ClassicStartMenuKey = oldClassicKey;
+                    DesktopSystemIcon.SuppressRefresh = oldSuppress;
+                }
+            }
+            finally
+            {
+                try
+                {
+                    Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(tempKeyRoot, throwOnMissingSubKey: false);
+
+                    // 顺手把 CreateSubKey 顺带建出来的空父键也收掉，别给用户留垃圾
+                    const string tempParent = @"Software\DeskBox";
+                    using (var parent = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(tempParent))
+                    {
+                        if (parent is not null && parent.SubKeyCount == 0 && parent.ValueCount == 0)
+                        {
+                            parent.Close();
+                            Microsoft.Win32.Registry.CurrentUser.DeleteSubKey(tempParent, throwOnMissingSubKey: false);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"自检：清理临时注册表子键失败 {ex.Message}");
+                }
+            }
+
+
         }
         catch (Exception ex)
         {
@@ -457,6 +1098,108 @@ public static class SelfTest
             catch
             {
                 // 清理失败不影响结论
+            }
+        }
+
+        // 19) 图标管线：磁盘 PNG 缓存往返 + TryGetFast + 统计（T2）
+        // 探针文件放在固定沙盒之外，保证这段在 sandbox 已清理后仍能独立跑完
+        var iconCacheDir = IconDiskCache.Directory;
+        var iconProbeDir = Path.Combine(Path.GetTempPath(), "DeskBox-IconProbe");
+        var iconProbe = Path.Combine(iconProbeDir, "自检图标.txt");
+        var iconPngBefore = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            Directory.CreateDirectory(iconProbeDir);
+            File.WriteAllText(iconProbe, "icon-probe");
+            const int iconSize = 48;
+
+            if (Directory.Exists(iconCacheDir))
+            {
+                foreach (var file in Directory.GetFiles(iconCacheDir, "*.png"))
+                {
+                    iconPngBefore.Add(file);
+                }
+            }
+
+            IconCache.Clear();
+            var probeIcon = IconCache.Get(iconProbe, iconSize);
+            Check("图标-首次取图非空", probeIcon is not null);
+            Check("图标-位图已冻结可跨线程", probeIcon is null || probeIcon.IsFrozen);
+
+            var iconPngCount = Directory.Exists(iconCacheDir)
+                ? Directory.GetFiles(iconCacheDir, "*.png").Length
+                : 0;
+            Check("图标-磁盘缓存目录出现 PNG", iconPngCount > 0, $"{iconCacheDir} 下 {iconPngCount} 个文件");
+
+            IconCache.Clear();
+            Check("图标-Clear 后内存立即为空", IconCache.TryGetFast(iconProbe, iconSize) is null);
+
+            var probeAgain = IconCache.Get(iconProbe, iconSize);
+            Check("图标-磁盘缓存命中可秒出", probeAgain is not null);
+            Check("图标-命中后 TryGetFast 立即有值", IconCache.TryGetFast(iconProbe, iconSize) is not null);
+
+            var iconStats = IconCache.StatsSummary();
+            var iconDiskHits = 0;
+            foreach (var part in iconStats.Split('/'))
+            {
+                var text = part.Trim();
+                if (text.StartsWith("磁盘命中", StringComparison.Ordinal))
+                {
+                    int.TryParse(text["磁盘命中".Length..].Trim(), out iconDiskHits);
+                }
+            }
+
+            Check("图标-StatsSummary 磁盘命中 > 0", iconDiskHits > 0, iconStats);
+
+            // 批量日志是去抖的（队列空后 400ms 才结算），这里等过窗口再回读日志验证可观测性
+            Thread.Sleep(700);
+            var iconLogLine = File.Exists(Log.FilePath)
+                ? File.ReadLines(Log.FilePath).LastOrDefault(line => line.Contains("[图标] ", StringComparison.Ordinal))
+                : null;
+            Check("图标-批量耗时日志已落盘",
+                iconLogLine is not null &&
+                iconLogLine.Contains("内存命中", StringComparison.Ordinal) &&
+                iconLogLine.Contains("磁盘命中", StringComparison.Ordinal) &&
+                iconLogLine.Contains("/ shell ", StringComparison.Ordinal),
+                iconLogLine ?? "（日志里没有 [图标] 行）");
+        }
+        catch (Exception ex)
+        {
+            failures++;
+            report.AppendLine($"[FAIL] 图标管线自查异常 — {ex.Message}");
+        }
+        finally
+        {
+            // 收尾：这次自检写进磁盘缓存的 PNG 与探针文件都清掉，不给配置目录留垃圾
+            try
+            {
+                if (Directory.Exists(iconCacheDir))
+                {
+                    foreach (var file in Directory.GetFiles(iconCacheDir, "*.png"))
+                    {
+                        if (!iconPngBefore.Contains(file))
+                        {
+                            File.Delete(file);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // 清理失败不影响结论
+            }
+
+            try
+            {
+                if (Directory.Exists(iconProbeDir))
+                {
+                    Directory.Delete(iconProbeDir, recursive: true);
+                }
+            }
+            catch
+            {
+                // 忽略
             }
         }
 
