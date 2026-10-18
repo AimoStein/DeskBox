@@ -66,6 +66,9 @@ internal static class IconLoader
     /// <summary>启动后的磁盘缓存超限检查只强制做一次。</summary>
     private static int _startupTrimDone;
 
+    /// <summary>首个图标就绪只在启动阶段记一次日志。</summary>
+    private static int _firstDeliveryLogged;
+
     static IconLoader()
     {
         BatchTimer = new Timer(_ => FlushBatch(), null, Timeout.Infinite, Timeout.Infinite);
@@ -309,6 +312,12 @@ internal static class IconLoader
         Inflight.TryRemove(ModeKey(request.Key, request.AllowShell), out _);
         request.Completion.TrySetResult(image);
 
+        if (image is not null && StartupTrace.IsStartup &&
+            Interlocked.CompareExchange(ref _firstDeliveryLogged, 1, 0) == 0)
+        {
+            Log.Info($"[启动] 首个图标就绪，自进程启动 {StartupTrace.SinceProcessStartMs}ms");
+        }
+
         if (Interlocked.Decrement(ref _pending) == 0)
         {
             NoteDrained();
@@ -537,7 +546,10 @@ internal static class IconLoader
         // 零星单个图标不记，避免刷屏；批量加载或明显卡顿的才留一条
         if (count >= 2 || elapsed >= 600)
         {
-            Log.Info($"[图标] {count} 项 内存命中 {memory} / 磁盘命中 {disk} / shell {shell} / 耗时 {elapsed}ms");
+            var sinceStart = StartupTrace.IsStartup
+                ? $"，自进程启动 {StartupTrace.SinceProcessStartMs}ms"
+                : string.Empty;
+            Log.Info($"[图标] {count} 项 内存命中 {memory} / 磁盘命中 {disk} / shell {shell} / 耗时 {elapsed}ms{sinceStart}");
         }
     }
 

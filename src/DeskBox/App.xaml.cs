@@ -20,20 +20,39 @@ public partial class App : Application
     /// <summary>同一现场的两条诊断日志各自的最小间隔，避免 UI 线程频繁写文件。</summary>
     private const int DesktopLogIntervalMs = 10000;
 
-    /// <summary>进程启动时间，用来在启动日志里给出"自进程启动以来的毫秒数"。</summary>
-    private static readonly DateTime ProcessStartTime = GetProcessStartTime();
-
     private readonly List<BoxWindow> _boxes = new();
 
-    /// <summary>启动阶段埋点：从 App 构造时开始计时。</summary>
-    private readonly Stopwatch _startupWatch = Stopwatch.StartNew();
-
-    private long _startupStageMs;
     private bool _startupComplete;
     private DispatcherTimer? _desktopSweepTimer;
+    private DispatcherTimer? _startupSweepTimer;
+    private DispatcherTimer? _boxRecoveryTimer;
     private DateTime _lastZOrderAction = DateTime.MinValue;
     private DateTime _lastCoveredLog = DateTime.MinValue;
     private DateTime _lastDiagnostics = DateTime.MinValue;
+    private DateTime _lastNormalizeLog = DateTime.MinValue;
+
+    /// <summary>当前是不是「显示桌面（Win+D / 任务栏最右按钮）」状态：桌面窗口在前台。</summary>
+    private bool _desktopShown;
+
+    /// <summary>显示桌面结束后的层叠自校验定时器：确认盒子真的贴在桌面之上，必要时再压一次。</summary>
+    private DispatcherTimer? _desktopLayerWatchTimer;
+    private int _desktopLayerWatchTicks;
+
+    /// <summary>本轮自校验里补压的次数（最多 2 次，避免窗口链上有别的窗口时反复重排）。</summary>
+    private int _desktopLayerCompensations;
+
+    /// <summary>上一次「飘在普通窗口层」自愈压底的时间，节流用。</summary>
+    private DateTime _lastFloatingFix = DateTime.MinValue;
+
+    /// <summary>被系统销毁的盒子窗口重建尝试次数。</summary>
+    private int _boxRecoveryAttempts;
+
+    /// <summary>重建盒子窗口最多尝试几次（Explorer 重启一般 1~2 秒内就绪）。</summary>
+    private const int BoxRecoveryMaxAttempts = 10;
+
+    /// <summary>桌面窗口显示日志的限流时间，避免壁纸类 WorkerW 反复显示时刷屏。</summary>
+    private DateTime _lastDesktopShowLog = DateTime.MinValue;
+    private int _startupSweepsLeft;
 
     private AppConfig _config = new();
     private DesktopShell _shell = new();
@@ -44,17 +63,26 @@ public partial class App : Application
     private DispatcherTimer? _saveTimer;
     private NativeMethods.WinEventProc? _foregroundProc;
     private IntPtr _foregroundHook;
+    private NativeMethods.WinEventProc? _desktopShowProc;
+    private IntPtr _desktopShowHook;
     private bool _lastShowHiddenFiles;
     private bool _exiting;
 
     /// <summary>只有真正持有单实例锁的进程才有权写配置，否则第二次启动会把配置覆盖成默认值。</summary>
     private bool _ownsConfig;
 
+    public App()
+    {
+        StartupTrace.Mark("App 构造（WPF 入口）");
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
         LogStartupStage("进程入口");
+        LogBootContext();
+
 
         if (e.Args.Contains("--desktop-icons-probe"))
         {
@@ -106,6 +134,9 @@ public partial class App : Application
         _ownsConfig = true;
         LogStartupStage("单实例锁");
 
+        // 开机时十几个自启动程序一起抢 CPU/磁盘：启动阶段临时提一档优先级，盒子出来就还原。
+        RaiseStartupPriority();
+
         DispatcherUnhandledException += (_, args) =>
         {
             Log.Warn("未处理异常: " + args.Exception);
@@ -115,6 +146,10 @@ public partial class App : Application
         _config = ConfigStore.Load();
         _lastShowHiddenFiles = _config.ShowHiddenFiles;
         LogStartupStage($"配置读取（盒子 {_config.Boxes.Count} 个）");
+
+        // 盒子还没建，先把各盒子目录里的图标从磁盘缓存解码进内存：
+        // 这样等窗口真正显示时，格内图标已经就绪，不会先闪一排占位图再换。
+        PrewarmBoxIcons();
 
         ThemeManager.Apply(_config.Theme);
         LogStartupStage("主题应用");
@@ -150,7 +185,13 @@ public partial class App : Application
 
         Log.Info($"启动：首次运行={firstRun}，已有盒子={_config.Boxes.Count}，根目录={_config.EffectiveBoxRoot}");
 
-        // 先把格子显示出来；托盘、鼠标钩子、前台监听都排到盒子出现之后，缩短"看不见"的时间
+        // 监听要最先挂上：任务计划程序登录任务可能比 Explorer 还早启动，
+        // 桌面窗口随后出现时会盖住盒子，越早收到"桌面显示"事件越能第一时间插回去。
+        WatchForegroundChanges();
+        WatchDesktopWindowAppearance();
+        LogStartupStage("前台/桌面监听");
+
+        // 先把格子显示出来；托盘、鼠标钩子、开机自启同步都排到首帧之后，缩短"看不见"的时间
         RestoreBoxes();
         LogStartupStage("盒子显示");
 
@@ -162,16 +203,58 @@ public partial class App : Application
             }
         }
 
+        // 到这里才算启动完成：在那之前不允许任何 z 序巡检，免得开机阶段反复重排窗口
+        _startupComplete = true;
+        RestoreStartupPriority();
+        LogStartupStage("启动完成（已允许桌面保持巡检）");
+        Log.Info($"盒子窗口归属桌面：{_boxes.Count(box => box.IsOwnedByDesktop)}/{_boxes.Count}（归属后 Win+D 不会盖住盒子）");
+        LogStartupDesktopState();
+
+        // 开机时 Explorer 可能比我们晚创建桌面窗口：启动完成后立刻巡检一次，
+        // 再在头几秒里用短周期巡检兜住"桌面刚出现又盖住盒子"的窗口期，
+        // 不必等每个盒子 1.5s 的常规定时器。
+        App.RequestDesktopSweep();
+        BeginStartupSweeps();
+
+        Log.Info("DeskBox 已启动。");
+        Log.Info($"[启动] 启动阶段同步写日志合计 {StartupTrace.LogWriteMs}ms");
+
+        // 首帧、首批图标、开机时桌面是否后出现，都要等 Dispatcher 转起来才看得到；
+        // 继续观测一小段时间，到点自动关掉启动日志。
+        StartupTrace.EndStartupAfter(TimeSpan.FromMilliseconds(2500));
+
+        // 托盘、鼠标钩子、右键菜单清理、自启同步都不影响"盒子出现"，排到首帧渲染之后的空闲优先级，
+        // 别和第一个窗口抢 UI 线程。
+        var startupFirstRun = firstRun;
+        var startupArgs = e.Args;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            try
+            {
+                FinishStartupWork(startupFirstRun, startupArgs);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("启动收尾失败: " + ex);
+            }
+        }));
+    }
+
+    /// <summary>
+    /// 首帧之后的启动收尾：托盘、鼠标钩子、历史右键菜单清理、开机自启同步、参数处理。
+    /// 这些都不挡盒子显示，放在 Background 优先级做。
+    /// </summary>
+    private void FinishStartupWork(bool firstRun, string[] args)
+    {
         if (firstRun && _boxes.Count == 0)
         {
             CreateNewBox();
         }
 
-        _tray = new TrayService();
-        _tray.Command += HandleCommand;
-        _tray.MenuOpening += UpdateTrayState;
-        _tray.ApplyTheme();
-        LogStartupStage("托盘图标");
+        if (_tray is null)
+        {
+            CreateTray();
+        }
 
         _mouseWatcher = new DesktopMouseWatcher { Enabled = _config.HideIconsOnDoubleClick };
         _mouseWatcher.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.BeginInvoke(ToggleIconsFromUser);
@@ -191,20 +274,17 @@ public partial class App : Application
 
         LogStartupStage("首次运行收尾与右键菜单清理");
 
-        WatchForegroundChanges();
-        LogStartupStage("前台监听");
+        // 老版本用 HKCU Run 自启，开机会被 Windows 延后几十秒；这里后台迁移到任务计划程序的登录任务。
+        var autoStart = _config.AutoStart;
+        _ = Task.Run(() => AutoStart.EnsureCurrent(autoStart));
 
-        // 到这里才算启动完成：在那之前不允许任何 z 序巡检，免得开机阶段反复重排窗口
-        _startupComplete = true;
-        LogStartupStage("启动完成（已允许桌面保持巡检）");
-
-        if (e.Args.Length > 0)
+        if (args.Length > 0)
         {
-            HandleArgs(e.Args);
+            HandleArgs(args);
         }
         else if (firstRun)
         {
-            _tray.ShowInfo(
+            _tray?.ShowInfo(
                 "DeskBox 已就绪",
                 "托盘图标右键就能一键整理盒子、整理桌面文件、新建盒子；双击桌面空白处可以隐藏所有图标。");
         }
@@ -212,51 +292,363 @@ public partial class App : Application
         {
             ShowSettings();
         }
-
-        Log.Info("DeskBox 已启动。");
     }
 
-    /// <summary>启动阶段埋点：统一 `[启动]` 前缀，给出本阶段、累计以及"自进程启动"的毫秒数。</summary>
-    private void LogStartupStage(string stage)
+    /// <summary>
+    /// 创建托盘图标。任务计划程序登录任务可能比 Explorer 早启动，这时任务栏还没建好；
+    /// WinForms 的 NotifyIcon 会在任务栏创建（TaskbarCreated 广播）后自己补上，失败时这里再重试几次。
+    /// </summary>
+    private void CreateTray()
     {
-        var elapsed = _startupWatch.ElapsedMilliseconds;
-        Log.Info($"[启动] {stage}：本阶段 {elapsed - _startupStageMs}ms，累计 {elapsed}ms，自进程启动 {MillisecondsSinceProcessStart()}ms");
-        _startupStageMs = elapsed;
+        try
+        {
+            _tray = new TrayService();
+            _tray.Command += HandleCommand;
+            _tray.MenuOpening += UpdateTrayState;
+            _tray.ApplyTheme();
+            LogStartupStage("托盘图标");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("创建托盘图标失败: " + ex.Message);
+
+            var attempts = 0;
+            var timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+            timer.Tick += (_, _) =>
+            {
+                if (_exiting || ++attempts > 5)
+                {
+                    timer.Stop();
+                    return;
+                }
+
+                try
+                {
+                    _tray = new TrayService();
+                    _tray.Command += HandleCommand;
+                    _tray.MenuOpening += UpdateTrayState;
+                    _tray.ApplyTheme();
+                    timer.Stop();
+                    Log.Info("托盘图标已补建。");
+                }
+                catch
+                {
+                    // 下一轮再试
+                }
+            };
+            timer.Start();
+        }
     }
 
-    /// <summary>自进程启动以来的毫秒数；取不到进程启动时间时返回 -1。</summary>
-    private static long MillisecondsSinceProcessStart()
+    /// <summary>
+    /// 启动完成时的桌面现场：盒子是不是已经被桌面窗口盖住了（开机时 Explorer 可能比我们后创建桌面窗口）。
+    /// 这条日志用来判断"开机后盒子隔几秒才出现"是不是 z 序竞态造成的。
+    /// </summary>
+    private void LogStartupDesktopState()
     {
-        return ProcessStartTime == DateTime.MinValue
-            ? -1
-            : (long)(DateTime.Now - ProcessStartTime).TotalMilliseconds;
+        try
+        {
+            var desktopRoot = NativeMethods.DesktopRoot();
+            var foreground = NativeMethods.GetForegroundWindow();
+            var covered = _boxes.Where(box => box.IsCoveredByDesktopNow()).ToList();
+
+            Log.Info(
+                $"[启动] 桌面现场：桌面根={desktopRoot}({NativeMethods.ClassNameOf(desktopRoot)}) " +
+                $"其上邻={NativeMethods.ClassNameOf(NativeMethods.GetWindow(desktopRoot, NativeMethods.GW_HWNDPREV))} " +
+                $"前台={NativeMethods.ClassNameOf(foreground)} 桌面在前台={NativeMethods.DesktopIsForeground()} " +
+                $"被桌面盖住的盒子={covered.Count}/{_boxes.Count}" +
+                (covered.Count > 0 ? $"（{string.Join("、", covered.Select(box => box.Config.Title))}）" : string.Empty));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("启动桌面现场检查失败: " + ex.Message);
+        }
     }
 
-    private static DateTime GetProcessStartTime()
+    /// <summary>
+    /// 开机上下文：系统已启动多久、Explorer 是否已经起来。
+    /// 用来判断"盒子是不是比桌面晚出来"——如果 Explorer 已运行很久我们才被拉起，那问题在自启动时机；
+    /// 如果 Explorer 还没起来，说明盒子先于桌面创建，问题会变成"桌面后出现把盒子盖住"。
+    /// </summary>
+    private static void LogBootContext()
+    {
+        try
+        {
+            var bootMs = Environment.TickCount64;
+            var explorer = "未知";
+
+            try
+            {
+                var started = Process.GetProcessesByName("explorer")
+                    .Select(process =>
+                    {
+                        try
+                        {
+                            return process.StartTime;
+                        }
+                        catch
+                        {
+                            return DateTime.MinValue;
+                        }
+                    })
+                    .Where(time => time != DateTime.MinValue)
+                    .DefaultIfEmpty(DateTime.MinValue)
+                    .Min();
+
+                explorer = started == DateTime.MinValue
+                    ? "尚未启动"
+                    : $"已运行 {(long)(DateTime.Now - started).TotalMilliseconds}ms";
+            }
+            catch
+            {
+                // 取不到就算了
+            }
+
+            Log.Info($"[启动] 开机上下文：系统已启动 {bootMs}ms，Explorer {explorer}，本进程自启动 {StartupTrace.SinceProcessStartMs}ms");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("启动上下文记录失败: " + ex.Message);
+        }
+    }
+
+    /// <summary>启动阶段临时提高进程优先级：开机时有十几个自启动程序一起抢 CPU，盒子出来就还原。</summary>
+    private static void RaiseStartupPriority()
     {
         try
         {
             using var process = Process.GetCurrentProcess();
-            return process.StartTime;
+            if (process.PriorityClass == ProcessPriorityClass.Normal)
+            {
+                process.PriorityClass = ProcessPriorityClass.AboveNormal;
+            }
         }
         catch
         {
-            return DateTime.MinValue;
+            // 权限不允许就算了
         }
     }
+
+    private static void RestoreStartupPriority()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            if (process.PriorityClass == ProcessPriorityClass.AboveNormal)
+            {
+                process.PriorityClass = ProcessPriorityClass.Normal;
+            }
+        }
+        catch
+        {
+            // 忽略
+        }
+    }
+
+    /// <summary>
+    /// 盒子还没建之前，后台把各盒子目录里的图标从磁盘缓存解码进内存。
+    /// 这样窗口第一次显示时图标已经就绪，不会先闪一排占位图再逐个换掉。
+    /// </summary>
+    private void PrewarmBoxIcons()
+    {
+        var boxes = _config.Boxes.ToList();
+        var root = _config.EffectiveBoxRoot;
+        var size = (int)_config.IconSize;
+        var includeHidden = _config.ShowHiddenFiles;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var paths = new List<string>();
+
+                foreach (var box in boxes)
+                {
+                    var folder = string.IsNullOrWhiteSpace(box.Folder)
+                        ? Path.Combine(root, FsUtil.Sanitize(box.Title))
+                        : box.Folder;
+
+                    try
+                    {
+                        if (!Directory.Exists(folder))
+                        {
+                            continue;
+                        }
+
+                        foreach (var path in Directory.EnumerateFileSystemEntries(folder))
+                        {
+                            if (Path.GetFileName(path).Equals("desktop.ini", StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
+                            if (!includeHidden && FsUtil.IsHiddenOrSystem(path))
+                            {
+                                continue;
+                            }
+
+                            paths.Add(path);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn($"图标预热读取目录失败 {folder}: {ex.Message}");
+                    }
+                }
+
+                if (paths.Count > 0)
+                {
+                    IconCache.Prewarm(paths, size);
+                    Log.Info($"[启动] 图标预热排队 {paths.Count} 项，自进程启动 {StartupTrace.SinceProcessStartMs}ms");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("图标预热失败: " + ex.Message);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 监听桌面窗口自己被显示：开机时 Explorer 若比我们晚创建桌面窗口，桌面会盖住盒子；
+    /// 这里不等 1.5s 定时器，收到事件就立刻安排一次巡检把盒子插回桌面之上。
+    /// Explorer 重启（新 Progman / WorkerW）同样走这条路径。
+    /// </summary>
+    private void WatchDesktopWindowAppearance()
+    {
+        _desktopShowProc = (_, _, hwnd, idObject, idChild, _, _) =>
+        {
+            // 只要窗口对象本身（OBJID_WINDOW / CHILDID_SELF）
+            if (idObject != 0 || idChild != 0 || !NativeMethods.IsDesktopWindow(hwnd))
+            {
+                return;
+            }
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_exiting || !_startupComplete)
+                {
+                    return;
+                }
+
+                if (DateTime.UtcNow - _lastDesktopShowLog >= TimeSpan.FromMilliseconds(DesktopLogIntervalMs))
+                {
+                    _lastDesktopShowLog = DateTime.UtcNow;
+                    Log.Info($"[启动] 桌面窗口显示（{NativeMethods.ClassNameOf(hwnd)}），立刻巡检盒子 z 序。");
+                }
+
+                // 新的桌面窗口出现（Explorer 重启 / 开机晚于盒子）：把盒子窗口重新归属到它上面，
+                // 并把旧的、已经被系统销毁的盒子窗口重建出来。
+                EnsureDesktopOwners(NativeMethods.DesktopOwnerWindow());
+                RecoverLostBoxesNow();
+
+                ScheduleDesktopSweep();
+            }));
+        };
+
+        _desktopShowHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_CREATE,
+            NativeMethods.EVENT_OBJECT_SHOW,
+            IntPtr.Zero,
+            _desktopShowProc,
+            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT | NativeMethods.WINEVENT_SKIPOWNPROCESS);
+
+        if (_desktopShowHook == IntPtr.Zero)
+        {
+            Log.Warn("注册桌面窗口显示监听失败，开机时会退回短周期巡检。");
+        }
+    }
+
+    /// <summary>
+    /// 启动完成后的头几秒用约 90ms 的短周期巡检兜住 z 序竞态：
+    /// 登录任务可能比 Explorer 还早启动，桌面窗口随后出现会盖住盒子；一旦发现就马上插回去，
+    /// 而不是等每个盒子 1.5s 的常规定时器。覆盖登录后桌面/壁纸窗口陆续创建的那段时间。
+    /// </summary>
+    private void BeginStartupSweeps()
+    {
+        const int sweepCount = 55; // 55 × 90ms ≈ 5s
+
+        _startupSweepsLeft = sweepCount;
+
+        if (_startupSweepTimer is null)
+        {
+            _startupSweepTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(90),
+            };
+            _startupSweepTimer.Tick += (_, _) =>
+            {
+                if (_exiting || _startupSweepsLeft <= 0)
+                {
+                    _startupSweepTimer!.Stop();
+                    return;
+                }
+
+                _startupSweepsLeft--;
+                RunDesktopSweep();
+            };
+        }
+
+        _startupSweepTimer.Start();
+    }
+
+    /// <summary>启动阶段埋点：统一 `[启动]` 前缀，给出本阶段、累计以及"自进程启动"的毫秒数。</summary>
+    private static void LogStartupStage(string stage) => StartupTrace.Mark(stage);
 
     #region 盒子管理
 
     /// <summary>
-    /// 盯着前台窗口的变化：按 Win+D 时桌面会成为前台窗口，盒子需要立刻把自己抬回桌面之上。
-    /// 这里只触发一次防抖巡检；点任务栏之类的前台变化直接跳过，不产生任何 z 序动作。
+    /// 盯着前台窗口的变化，只做两件事：
+    ///
+    /// 1. 桌面窗口成为前台（Win+D / 任务栏「显示桌面」）→ 记一个状态，不做任何 z 序动作。
+    ///    盒子窗口已经归属桌面根窗口（见 BoxWindow.AttachToDesktop），owned 窗口会被窗口管理器
+    ///    一起带上桌面层，全过程不会出现「桌面盖住盒子」的帧，所以这里不需要抢 z 序。
+    ///    只留一次兜底巡检：万一归属关系没挂上，还能按旧路径把盒子插回桌面之上。
+    ///
+    /// 2. 前台离开桌面窗口（再按一次 Win+D / 点任务栏窗口 / 点开始菜单）→ 同步把跟着桌面
+    ///    被抬到高处的盒子压回「桌面之上、普通窗口之下」。这一步必须同步做（不再 Dispatcher
+    ///    BeginInvoke + 防抖），否则恢复桌面后盒子会在普通窗口上面多停几帧，看起来还是闪。
+    ///
+    /// 点任务栏 / 开始菜单这类不会盖住盒子的前台变化，在恢复完层叠后直接跳过，不触发巡检。
     /// </summary>
     private void WatchForegroundChanges()
     {
-        _foregroundProc = (_, _, _, _, _, _, _) => Dispatcher.BeginInvoke(new Action(() =>
+        // WinEvent 回调就是在装钩子的线程（UI 线程）上送达的，这里直接做 z 序处理。
+        _foregroundProc = (_, _, hwnd, _, _, _, _) =>
         {
-            // 点任务栏 / 开始菜单 / 任务栏缩略图不会盖住盒子：完全跳过
-            if (NativeMethods.IsShellTrayWindow(NativeMethods.GetForegroundWindow()))
+            if (_exiting)
+            {
+                return;
+            }
+
+            var foreground = hwnd != IntPtr.Zero ? hwnd : NativeMethods.GetForegroundWindow();
+
+            if (NativeMethods.IsDesktopWindow(foreground))
+            {
+                _desktopShown = true;
+
+                // 兜底：归属关系没生效时，仍然走原来的「巡检把盒子插回桌面之上」。
+                Dispatcher.BeginInvoke(new Action(ScheduleDesktopSweep), DispatcherPriority.Background);
+                return;
+            }
+
+            if (_desktopShown)
+            {
+                _desktopShown = false;
+                NormalizeBoxesToDesktopLayer();
+            }
+            else
+            {
+                // 兜底自愈：某些系统时序（例如快速连按 Win+D、第三方显示桌面工具）会让盒子
+                // 停在普通窗口层高处，而前台事件又不是「桌面 -> 普通窗口」的标准路径。
+                // 这里只在前台是普通窗口时做一次廉价校验，发现盒子没贴住桌面层才压底。
+                EnsureBoxesAtDesktopLayerIfFloating();
+            }
+
+            // 点任务栏 / 开始菜单 / 任务栏缩略图不会盖住盒子：不需要额外巡检
+            if (NativeMethods.IsShellTrayWindow(foreground))
             {
                 return;
             }
@@ -265,7 +657,7 @@ public partial class App : Application
             {
                 box.KeepVisibleOnDesktop();
             }
-        }));
+        };
 
         _foregroundHook = NativeMethods.SetWinEventHook(
             NativeMethods.EVENT_SYSTEM_FOREGROUND,
@@ -279,6 +671,191 @@ public partial class App : Application
         if (_foregroundHook == IntPtr.Zero)
         {
             Log.Warn("注册前台窗口监听失败，Win+D 后的恢复会退回定时器处理。");
+        }
+    }
+
+    /// <summary>
+    /// 显示桌面结束后，把跟着桌面被抬上去的盒子同步压回「桌面之上、普通窗口之下」。
+    /// 只动盒子自己的 z 序，不碰桌面窗口（改桌面的 z 序会触发整屏重绘，那才是真正的闪烁来源）。
+    /// </summary>
+    private void NormalizeBoxesToDesktopLayer()
+    {
+        if (_exiting || !_startupComplete || BoxWindow.DesktopInteractionActive)
+        {
+            return;
+        }
+
+        PushBoxesToDesktopLayer();
+        WatchDesktopLayerRestored();
+    }
+
+    /// <summary>把每个可见盒子的 z 序压回「桌面根窗口正上方」。</summary>
+    private void PushBoxesToDesktopLayer()
+    {
+        // owner 必须是 DesktopOwnerWindow（SHELLDLL_DefView）：直接挂 Progman 会让外壳在盒子
+        // 成为前台窗口后误判「桌面已显示」，再按 Win+D 就没有反应。
+        var desktopOwner = NativeMethods.DesktopOwnerWindow();
+        if (desktopOwner == IntPtr.Zero)
+        {
+            return;
+        }
+
+        foreach (var box in _boxes)
+        {
+            box.AttachToDesktop(desktopOwner);
+            box.NormalizeToDesktopLayer();
+        }
+
+        if (DateTime.UtcNow - _lastNormalizeLog >= TimeSpan.FromMilliseconds(DesktopLogIntervalMs))
+        {
+            _lastNormalizeLog = DateTime.UtcNow;
+            Log.Info($"显示桌面结束：已把 {_boxes.Count} 个盒子同步压回桌面之上。");
+        }
+    }
+
+    /// <summary>
+    /// 显示桌面结束后做一小段自校验：系统降下桌面窗口的时序不一定早于前台事件。
+    /// 如果某次压底发生在这之前，盒子会停在当时还高高的桌面根窗口上方，等桌面降下去就飘在
+    /// 普通窗口层高处。这里每隔 60ms 检查一次「桌面根窗口正上方是不是这些盒子」，
+    /// 不对就再压一次；最多检查约 800ms，避免异常情况下无限重排。
+    /// </summary>
+    private void WatchDesktopLayerRestored()
+    {
+        if (_exiting)
+        {
+            return;
+        }
+
+        if (_desktopLayerWatchTimer is null)
+        {
+            _desktopLayerWatchTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(60),
+            };
+            _desktopLayerWatchTimer.Tick += (_, _) => VerifyDesktopLayerRestored();
+        }
+
+        _desktopLayerWatchTicks = 0;
+        _desktopLayerCompensations = 0;
+        _desktopLayerWatchTimer.Start();
+    }
+
+    private void VerifyDesktopLayerRestored()
+    {
+        _desktopLayerWatchTicks++;
+
+        if (_exiting || _desktopLayerWatchTicks > 16)
+        {
+            _desktopLayerWatchTimer?.Stop();
+            return;
+        }
+
+        // 还在显示桌面状态：等桌面降下来再看情况。
+        if (NativeMethods.DesktopIsForeground())
+        {
+            return;
+        }
+
+        var desktopRoot = NativeMethods.DesktopRoot();
+        if (desktopRoot == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var handles = _boxes
+            .Where(box => box.IsVisible)
+            .Select(box => box.BoxHandle)
+            .Where(handle => handle != IntPtr.Zero)
+            .ToList();
+
+        if (handles.Count == 0)
+        {
+            _desktopLayerWatchTimer?.Stop();
+            return;
+        }
+
+        if (NativeMethods.AreBoxesAtDesktopLayer(handles, desktopRoot))
+        {
+            // 注意：这里不能提前停止。桌面根窗口可能还没降下来，此时盒子贴在它上方是「暂时正确」的；
+            // 等桌面降下去，盒子就飘在普通窗口层高处了，必须继续观察到窗口期结束。
+            return;
+        }
+
+        // 只允许补压两次，避免窗口链上有别的窗口时反复重排。
+        if (_desktopLayerCompensations >= 2)
+        {
+            _desktopLayerWatchTimer?.Stop();
+            return;
+        }
+
+        _desktopLayerCompensations++;
+        PushBoxesToDesktopLayer();
+    }
+
+    /// <summary>
+    /// 廉价自愈：前台已经是普通窗口时，确认盒子是否真的紧贴桌面根窗口上方；
+    /// 只有确实飘到普通窗口层高处时才重新压底（不碰桌面窗口，不产生多余重排）。
+    /// 前台是盒子自己时跳过，避免把用户正在操作的盒子压下去。
+    /// </summary>
+    private void EnsureBoxesAtDesktopLayerIfFloating()
+    {
+        if (_exiting || !_startupComplete || BoxWindow.DesktopInteractionActive)
+        {
+            return;
+        }
+
+        if (NativeMethods.DesktopIsForeground())
+        {
+            return;
+        }
+
+        var desktopRoot = NativeMethods.DesktopRoot();
+        if (desktopRoot == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var foreground = NativeMethods.GetForegroundWindow();
+        foreach (var box in _boxes)
+        {
+            if (box.BoxHandle == foreground)
+            {
+                return;
+            }
+        }
+
+        var handles = _boxes
+            .Where(box => box.IsVisible)
+            .Select(box => box.BoxHandle)
+            .Where(handle => handle != IntPtr.Zero)
+            .ToList();
+
+        if (handles.Count == 0 || NativeMethods.AreBoxesAtDesktopLayer(handles, desktopRoot))
+        {
+            return;
+        }
+
+        // 节流：真正需要补压时最多 2 秒一次，避免启动阶段或频繁切前台时反复重排。
+        if (DateTime.UtcNow - _lastFloatingFix < TimeSpan.FromSeconds(2))
+        {
+            return;
+        }
+
+        _lastFloatingFix = DateTime.UtcNow;
+        PushBoxesToDesktopLayer();
+    }
+
+    /// <summary>确保每个盒子窗口的 owner 都是当前的桌面窗口（Explorer 重启后桌面窗口会换）。</summary>
+    private void EnsureDesktopOwners(IntPtr desktopOwner)
+    {
+        if (desktopOwner == IntPtr.Zero)
+        {
+            return;
+        }
+
+        foreach (var box in _boxes)
+        {
+            box.AttachToDesktop(desktopOwner);
         }
     }
 
@@ -339,6 +916,13 @@ public partial class App : Application
 
         SystemIconGuard.Reconcile();
 
+        // 安全网：盒子如果因为系统时序飘到了普通窗口层高处（而不是贴在桌面根窗口上方），压回去。
+        EnsureBoxesAtDesktopLayerIfFloating();
+
+        // 桌面窗口可能刚被 Explorer 重建：把盒子窗口的 owner 重新挂到当前桌面窗口上。
+        var desktopRoot = NativeMethods.DesktopRoot();
+        EnsureDesktopOwners(NativeMethods.DesktopOwnerWindow());
+
         // 点任务栏 / 开始菜单 / 任务栏缩略图时完全跳过（安全网定时器也可能在这时触发）
         if (NativeMethods.IsShellTrayWindow(NativeMethods.GetForegroundWindow()))
         {
@@ -361,7 +945,6 @@ public partial class App : Application
 
         _lastZOrderAction = DateTime.UtcNow;
 
-        var desktopRoot = NativeMethods.DesktopRoot();
         var desktopPushed = false;
         var details = new List<string>(covered.Count);
 
@@ -473,11 +1056,28 @@ public partial class App : Application
             _foregroundHook = IntPtr.Zero;
         }
 
+        if (_desktopShowHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_desktopShowHook);
+            _desktopShowHook = IntPtr.Zero;
+        }
+
         _foregroundProc = null;
+        _desktopShowProc = null;
+        _startupSweepTimer?.Stop();
+        _desktopLayerWatchTimer?.Stop();
+        _desktopLayerWatchTimer = null;
+        _boxRecoveryTimer?.Stop();
+        _boxRecoveryTimer = null;
     }
 
     private void RestoreBoxes()
     {
+        var pending = new List<BoxWindow>(_config.Boxes.Count);
+
+        // 先把所有盒子窗口构造出来（各自挂文件监视、条目与图标预热），再一起显示。
+        // 第一个窗口要付 WPF 渲染初始化的一次性成本，这样"亮出盒子"这一步只等一次，
+        // 不会出现"第一个盒子先出来、后面几个再一个个补"的延迟。
         foreach (var boxConfig in _config.Boxes.ToList())
         {
             if (string.IsNullOrWhiteSpace(boxConfig.Folder) || !Directory.Exists(boxConfig.Folder))
@@ -487,11 +1087,22 @@ public partial class App : Application
                 continue;
             }
 
-            CreateBoxWindow(boxConfig);
+            pending.Add(CreateBoxWindow(boxConfig, show: false));
+        }
+
+        foreach (var window in pending)
+        {
+            var watch = Stopwatch.StartNew();
+            window.Show();
+
+            if (!_startupComplete)
+            {
+                Log.Info($"[启动] 盒子「{window.Config.Title}」显示 {watch.ElapsedMilliseconds}ms，自进程启动 {StartupTrace.SinceProcessStartMs}ms");
+            }
         }
     }
 
-    private BoxWindow CreateBoxWindow(BoxConfig boxConfig)
+    private BoxWindow CreateBoxWindow(BoxConfig boxConfig, bool show = true)
     {
         var watch = Stopwatch.StartNew();
 
@@ -502,14 +1113,18 @@ public partial class App : Application
 
         window.Changed += (_, _) => ScheduleSave();
         window.RemovalRequested += (sender, _) => RemoveBox((BoxWindow)sender!);
+        window.Closed += OnBoxWindowClosed;
 
         _boxes.Add(window);
-        window.Show();
-        watch.Stop();
 
         if (!_startupComplete)
         {
-            Log.Info($"[启动] 盒子「{boxConfig.Title}」构造+显示：{watch.ElapsedMilliseconds}ms，自进程启动 {MillisecondsSinceProcessStart()}ms");
+            Log.Info($"[启动] 盒子「{boxConfig.Title}」构造 {watch.ElapsedMilliseconds}ms，自进程启动 {StartupTrace.SinceProcessStartMs}ms");
+        }
+
+        if (show)
+        {
+            window.Show();
         }
 
         return window;
@@ -539,6 +1154,134 @@ public partial class App : Application
         _config.Boxes.Remove(window.Config);
         window.Close();
         ConfigStore.Save(_config);
+    }
+
+    /// <summary>
+    /// 盒子窗口关闭。用户主动关闭（解散盒子、退出程序）不处理；
+    /// 被系统销毁——典型是 Explorer 重启导致桌面窗口（窗口的 owner）被销毁，
+    /// owned 窗口会被系统一起销毁——则自动把窗口重建回来，避免整排盒子消失。
+    /// </summary>
+    private void OnBoxWindowClosed(object? sender, EventArgs e)
+    {
+        if (_exiting || sender is not BoxWindow window)
+        {
+            return;
+        }
+
+        if (!_boxes.Contains(window))
+        {
+            return; // RemoveBox 先移除再 Close，属于预期关闭
+        }
+
+        _boxes.Remove(window);
+
+        if (window.ClosedByRequest)
+        {
+            Log.Info($"盒子「{window.Config.Title}」窗口已关闭。");
+            return;
+        }
+
+        Log.Warn($"盒子「{window.Config.Title}」窗口被系统销毁（多半是 Explorer 重启），准备自动重建。");
+
+        // 全部盒子窗口一起被销毁时，WPF 默认会在最后一个窗口关闭后退出进程；
+        // 切到显式退出把进程留住，等重建定时器把新的盒子窗口建出来。
+        if (Application.Current.ShutdownMode == ShutdownMode.OnLastWindowClose)
+        {
+            Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        }
+
+        ScheduleBoxRecovery();
+    }
+
+    /// <summary>安排一次盒子窗口重建（防抖：一批窗口被销毁只跑一个定时器）。</summary>
+    private void ScheduleBoxRecovery()
+    {
+        if (_boxRecoveryTimer is null)
+        {
+            _boxRecoveryTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(700),
+            };
+            _boxRecoveryTimer.Tick += (_, _) => RecoverLostBoxesNow();
+        }
+
+        if (!_boxRecoveryTimer.IsEnabled)
+        {
+            _boxRecoveryAttempts = 0;
+            _boxRecoveryTimer.Start();
+        }
+    }
+
+    /// <summary>
+    /// 把配置里存在、但当前没有窗口的盒子重新建出来。Explorer 重启后需要等新的桌面窗口就绪，
+    /// 所以由定时器反复尝试；连续失败到上限后停手（进程仍在托盘，用户可以手动新建盒子）。
+    /// </summary>
+    private void RecoverLostBoxesNow()
+    {
+        if (_exiting)
+        {
+            _boxRecoveryTimer?.Stop();
+            return;
+        }
+
+        var missing = _config.Boxes
+            .Where(config => !_boxes.Any(window => ReferenceEquals(window.Config, config)))
+            .ToList();
+
+        if (missing.Count == 0)
+        {
+            if (_boxRecoveryTimer is not null)
+            {
+                _boxRecoveryTimer.Stop();
+            }
+
+            if (Application.Current.ShutdownMode == ShutdownMode.OnExplicitShutdown)
+            {
+                Application.Current.ShutdownMode = ShutdownMode.OnLastWindowClose;
+            }
+
+            return;
+        }
+
+        _boxRecoveryAttempts++;
+        if (_boxRecoveryAttempts > BoxRecoveryMaxAttempts)
+        {
+            _boxRecoveryTimer?.Stop();
+            Log.Warn($"盒子窗口自动重建失败（{BoxRecoveryMaxAttempts} 次未成功），剩余 {missing.Count} 个盒子未被重建。");
+            return;
+        }
+
+        var pending = new List<BoxWindow>(missing.Count);
+        foreach (var config in missing)
+        {
+            if (string.IsNullOrWhiteSpace(config.Folder) || !Directory.Exists(config.Folder))
+            {
+                Log.Warn($"盒子目录不存在，跳过重建：「{config.Title}」");
+                continue;
+            }
+
+            try
+            {
+                pending.Add(CreateBoxWindow(config, show: false));
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"重建盒子「{config.Title}」失败: {ex.Message}");
+            }
+        }
+
+        foreach (var window in pending)
+        {
+            window.Show();
+            window.AttachToDesktop();
+            window.NormalizeToDesktopLayer();
+        }
+
+        if (pending.Count > 0)
+        {
+            Log.Info($"已重建 {pending.Count} 个盒子窗口（第 {_boxRecoveryAttempts} 次尝试）。");
+            ScheduleDesktopSweep();
+        }
     }
 
     private void CreateNewBox()

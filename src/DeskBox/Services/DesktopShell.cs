@@ -7,15 +7,20 @@ namespace DeskBox.Services;
 /// <summary>负责与「桌面」这个系统对象打交道：图标显隐、桌面条目枚举。</summary>
 public sealed class DesktopShell
 {
+    // 路径解析会走 shell（SHGetFolderPath），开机时可能几十毫秒；放到第一次真正用到时再解析，
+    // 别让它在 App 构造阶段挡住盒子。
+    private readonly Lazy<string> _desktopPath;
+    private readonly Lazy<string> _publicDesktopPath;
+
     public DesktopShell(string? desktopPath = null)
     {
-        DesktopPath = desktopPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        _desktopPath = new Lazy<string>(() => desktopPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
+        _publicDesktopPath = new Lazy<string>(() => Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
     }
 
-    public string DesktopPath { get; }
+    public string DesktopPath => _desktopPath.Value;
 
-    public string PublicDesktopPath =>
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+    public string PublicDesktopPath => _publicDesktopPath.Value;
 
     /// <summary>桌面图标当前是否可见（读取资源管理器自己的设置）。</summary>
     public bool IconsVisible

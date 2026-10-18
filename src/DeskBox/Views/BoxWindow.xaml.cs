@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -18,6 +19,9 @@ public partial class BoxWindow : Window
 {
     public const double ShadowPad = 12;
     private const double TitleHeight = 34;
+
+    /// <summary>启动阶段玻璃延后初始化时的临时底色浓度：至少让格子边框里的内容有个底，别完全透明。</summary>
+    private const double StartupBackdropOpacity = 0.18;
     internal const double ContentHorizontalChrome = 6; // icon view: 1 DIP border + 2 DIP content margin per side
     internal const double ContentVerticalChrome = 46;   // border + title + bottom margin + scroll padding
     private bool _fittingHeight;
@@ -49,24 +53,36 @@ public partial class BoxWindow : Window
     private Point _moveStart;
     private Rect _moveOrigin;
     private bool _wantVisible = true;
+    private bool _firstContentRendered;
+
+    /// <summary>当前把本窗口挂在哪个桌面窗口的 owner 上（Zero 表示还没挂）。</summary>
+    private IntPtr _desktopOwner;
+
+    /// <summary>窗口是否收到过 WM_CLOSE：用户/程序主动关闭走 WM_CLOSE，被 owner 销毁不走。</summary>
+    private bool _receivedCloseMessage;
 
     // 按下时固定列宽，整段拖动使用相同列宽。
     private double _resizeCellWidth;
 
     public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell, Func<string, IReadOnlyList<BoxRect>>? peers = null)
     {
+        var startupWatch = StartupTrace.IsStartup ? Stopwatch.StartNew() : null;
+
         _config = config;
         _box = box;
         _shell = shell;
         _peers = peers;
 
         InitializeComponent();
+        var xamlMs = startupWatch?.ElapsedMilliseconds ?? 0;
 
         GlassBackground.Config = config;
         GlassBackground.AvailabilityChanged += available =>
         {
             if (available) Log.Info($"Liquid Glass: 盒子「{_box.Title}」实时玻璃已就绪。");
-            Backdrop.Opacity = available ? 1 : _config.BoxOpacity;
+            Backdrop.Opacity = available
+                ? 1
+                : GlassPendingOpacity();
             if (available) Frame.BorderBrush = new SolidColorBrush(Color.FromArgb(48, 255, 255, 255));
             else Frame.SetResourceReference(Border.BorderBrushProperty, "BoxBorderBrush");
             ApplyGlassForeground(available);
@@ -81,12 +97,38 @@ public partial class BoxWindow : Window
         ApplyViewMode();
         ApplyLockState();
         ApplyCollapseState();
+        var visualMs = startupWatch?.ElapsedMilliseconds ?? 0;
 
         AttachWatcher();
         ReloadItems();
+        var contentMs = startupWatch?.ElapsedMilliseconds ?? 0;
 
         SetupTimers();
         WireEvents();
+
+        // 启动阶段玻璃是延后初始化的：先给临时底色；若玻璃最终没起来（不支持 / 驱动没就绪），
+        // 观测期结束后恢复用户配置的浓度，保持"没有玻璃时不强行加底色"的原有行为。
+        if (StartupTrace.IsStartup && _config.LiquidGlassEnabled)
+        {
+            var restoreTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromSeconds(3.5),
+            };
+            restoreTimer.Tick += (_, _) =>
+            {
+                restoreTimer.Stop();
+                if (!GlassBackground.IsAvailable)
+                {
+                    Backdrop.Opacity = _config.BoxOpacity;
+                }
+            };
+            restoreTimer.Start();
+        }
+
+        if (startupWatch is not null)
+        {
+            Log.Info($"[启动] 盒子「{box.Title}」初始化：XAML {xamlMs}ms / 外观 {visualMs - xamlMs}ms / 内容 {contentMs - visualMs}ms / 事件 {startupWatch.ElapsedMilliseconds - contentMs}ms");
+        }
     }
 
     /// <summary>需要保存配置。</summary>
@@ -217,6 +259,9 @@ public partial class BoxWindow : Window
     {
         SourceInitialized += (_, _) =>
         {
+            // 先把窗口归属挂到桌面根窗口，再压底：之后 Win+D 把桌面提起来时，
+            // 窗口管理器会把 owned 窗口一起带上去，不会出现「桌面盖住盒子」的那一帧。
+            AttachToDesktop();
             PushDown();
 
             // 拦掉"最小化"：Win+D（显示桌面）会让系统最小化所有窗口，盒子不该跟着消失
@@ -234,6 +279,19 @@ public partial class BoxWindow : Window
             }
         };
         Loaded += (_, _) => { FitContentHeight(); UpdateClip(); };
+        ContentRendered += (_, _) =>
+        {
+            if (_firstContentRendered)
+            {
+                return;
+            }
+
+            _firstContentRendered = true;
+            if (StartupTrace.IsStartup)
+            {
+                Log.Info($"[启动] 盒子「{_box.Title}」首帧（ContentRendered）自进程启动 {StartupTrace.SinceProcessStartMs}ms");
+            }
+        };
 
         LocationChanged += (_, _) => SchedulePersist();
         SizeChanged += (_, e) =>
@@ -264,9 +322,18 @@ public partial class BoxWindow : Window
     private const int SC_MINIMIZE = 0xF020;
     private const int WM_SIZE = 0x0005;
     private const int SIZE_MINIMIZED = 1;
+    private const int WM_CLOSE = 0x0010;
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WM_CLOSE)
+        {
+            // 主动关闭（解散盒子 / 退出程序）走 WM_CLOSE；被 owner（桌面窗口）销毁时不走这里。
+            // 程序据此区分「用户要关」和「Explorer 重启把窗口带走了」，后者需要重建。
+            _receivedCloseMessage = true;
+            return IntPtr.Zero;
+        }
+
         if (msg == WM_SYSCOMMAND && (wParam.ToInt64() & 0xFFF0) == SC_MINIMIZE)
         {
             // Win+D 走 SC_MINIMIZE 时直接拒掉
@@ -339,8 +406,71 @@ public partial class BoxWindow : Window
     // 外部 Explorer 拖入也要保护：它不会经过本进程的 DoDragDrop。
     internal static bool DesktopInteractionActive => AnyDragging || NativeMethods.IsLeftMouseButtonDown();
 
-    /// <summary>这个盒子窗口的 HWND（窗口还没创建时是 Zero）。</summary>
+    /// <summary>当前盒子窗口的 HWND（窗口还没创建时是 Zero）。</summary>
     internal IntPtr BoxHandle => new WindowInteropHelper(this).Handle;
+
+    /// <summary>窗口是否已经归属桌面根窗口（owner 关系）。</summary>
+    internal bool IsOwnedByDesktop => _desktopOwner != IntPtr.Zero;
+
+    /// <summary>窗口是不是收到了 WM_CLOSE（主动关闭）才关掉的；否则多半是 owner 被销毁。</summary>
+    internal bool ClosedByRequest => _receivedCloseMessage;
+
+    /// <summary>
+    /// 把窗口的 owner 设成桌面根窗口（Progman / 承载 SHELLDLL_DefView 的顶层窗口）。
+    ///
+    /// 这是「Win+D 不闪」的关键：owner 关系由窗口管理器保证 owned 窗口永远在 owner 之上。
+    /// 按 Win+D 时系统只是把桌面窗口提到普通窗口层最上面，盒子作为它的 owned 窗口会被一起带上去，
+    /// 整个过程中盒子一帧都不会被桌面盖住，也就不需要事后再把盒子插回来（那正是过去闪烁的来源）。
+    /// owner 变化（Explorer 重启 / 桌面窗口重建）时重新挂一次。
+    /// </summary>
+    internal void AttachToDesktop() => AttachToDesktop(NativeMethods.DesktopOwnerWindow());
+
+    internal void AttachToDesktop(IntPtr desktopOwner)
+    {
+        if (_exiting || desktopOwner == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero || !NativeMethods.IsWindow(handle))
+        {
+            return;
+        }
+
+        if (NativeMethods.GetWindowOwner(handle) == desktopOwner)
+        {
+            _desktopOwner = desktopOwner;
+            return;
+        }
+
+        NativeMethods.SetWindowOwner(handle, desktopOwner);
+        _desktopOwner = desktopOwner;
+
+        // 换 owner 时窗口在 z 序里的位置可能被约束到别处，重新压回「桌面之上、普通窗口之下」。
+        NativeMethods.PushToBottom(handle);
+        Log.Info($"盒子「{_box.Title}」窗口已归属桌面窗口（Win+D 时不再被桌面盖住）。");
+    }
+
+    /// <summary>
+    /// Win+D 结束后把盒子压回桌面之上、普通窗口之下（窗口有 owner 时 HWND_BOTTOM 会被
+    /// 窗口管理器约束回「紧贴 owner 上方」，结果正好是原来的层叠位置）。
+    /// </summary>
+    internal void NormalizeToDesktopLayer()
+    {
+        if (_exiting || !_wantVisible)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero || !NativeMethods.IsWindow(handle))
+        {
+            return;
+        }
+
+        NativeMethods.PushToBottom(handle);
+    }
 
     /// <summary>
     /// 盒子内容区里的采样点（物理像素、屏幕坐标）：中心 + 上下左右各 1/4 处。
@@ -428,7 +558,7 @@ public partial class BoxWindow : Window
     private void ApplyVisualSettings()
     {
         GlassBackground.Refresh();
-        Backdrop.Opacity = GlassBackground.IsAvailable ? 1 : _config.BoxOpacity;
+        Backdrop.Opacity = GlassBackground.IsAvailable ? 1 : GlassPendingOpacity();
         ApplyGlassForeground(GlassBackground.IsAvailable);
 
         var radius = new CornerRadius(_config.CornerRadius);
@@ -436,6 +566,15 @@ public partial class BoxWindow : Window
         Frame.CornerRadius = radius;
         UpdateClip();
     }
+
+    /// <summary>
+    /// 玻璃还没就绪时底色用多大浓度：启动阶段先给一个可见的临时底色（否则浓度 0% 的配置会让格子完全透明），
+    /// 运行期就是用户配置的浓度。
+    /// </summary>
+    private double GlassPendingOpacity() =>
+        StartupTrace.IsStartup && _config.LiquidGlassEnabled && !GlassBackground.IsAvailable
+            ? Math.Max(_config.BoxOpacity, StartupBackdropOpacity)
+            : _config.BoxOpacity;
 
     private void ApplyGlassForeground(bool available)
     {
@@ -531,10 +670,17 @@ public partial class BoxWindow : Window
     /// <summary>
     /// 把盒子压回"桌面之上、普通窗口之下"。
     /// 300ms 内不重复压：窗口本来就在底层时再压一次，只会让分层窗口重排一遍（看起来就是闪一下）。
+    /// 已经挂上桌面 owner 且当前正处在 Win+D（桌面在前台）状态时直接跳过：
+    /// 这时 owned 窗口本来就被窗口管理器抬在桌面之上，压底只会白白重排一遍。
     /// </summary>
     private void PushDown()
     {
         if (_exiting || !_wantVisible || DesktopInteractionActive)
+        {
+            return;
+        }
+
+        if (_desktopOwner != IntPtr.Zero && NativeMethods.DesktopIsForeground())
         {
             return;
         }
@@ -690,15 +836,15 @@ public partial class BoxWindow : Window
                 continue;
             }
 
-            var item = new BoxItem(path, size) { IsSelected = selected.Contains(path) };
+            // 预热后内存里通常已有真图标：先查一下再建条目，首帧直接就是图标，不闪占位图。
             var cached = IconCache.TryGetFast(path, size);
-            if (cached is not null)
-            {
-                item.Icon = cached;
-            }
-
+            var item = new BoxItem(path, size, cached) { IsSelected = selected.Contains(path) };
             _items.Insert(index, item);
-            _ = LoadIconAsync(item);
+
+            if (cached is null)
+            {
+                _ = LoadIconAsync(item);
+            }
         }
 
         EmptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -712,9 +858,14 @@ public partial class BoxWindow : Window
     private static async Task LoadIconAsync(BoxItem item)
     {
         var requestedSize = item.IconSize;
-        // Let rapid slider updates settle before asking the shell for another bitmap.
-        await Task.Delay(120);
-        if (item.IconSize != requestedSize) return;
+
+        // 运行期让快速拖动图标大小的更新先稳定下来再问 shell；
+        // 启动阶段没有这个场景，直接取，图标能早一帧出现。
+        if (!StartupTrace.IsStartup)
+        {
+            await Task.Delay(120);
+            if (item.IconSize != requestedSize) return;
+        }
         for (var attempt = 0; attempt < 2; attempt++)
         {
             try

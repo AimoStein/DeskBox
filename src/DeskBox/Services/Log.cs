@@ -17,6 +17,7 @@ public static class Log
     {
         try
         {
+            var watch = Services.StartupTrace.IsStartup ? System.Diagnostics.Stopwatch.StartNew() : null;
             lock (Gate)
             {
                 Directory.CreateDirectory(Models.ConfigStore.Directory);
@@ -28,6 +29,11 @@ public static class Log
                 {
                     File.Move(FilePath, FilePath + ".old", overwrite: true);
                 }
+            }
+
+            if (watch is not null)
+            {
+                Services.StartupTrace.NoteLogWrite(watch.ElapsedTicks);
             }
         }
         catch

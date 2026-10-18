@@ -14,14 +14,17 @@ public sealed class BoxItem : INotifyPropertyChanged
     private bool _insertMark;
     private string? _iconKey;
 
-    public BoxItem(string path, int iconSize)
+    public BoxItem(string path, int iconSize, BitmapSource? initialIcon = null)
     {
         Path = path;
         Name = DisplayName(path);
 
         IsDirectory = Directory.Exists(path);
         RefreshFileState(iconSize);
-        Icon = IconCacheHolder.Placeholder(iconSize);
+
+        // 启动时图标已经从磁盘缓存预热到内存：直接用真图标建条目，
+        // 不必先做一次占位图（首次创建 RenderTargetBitmap 要几十毫秒）。
+        Icon = initialIcon ?? IconCacheHolder.Placeholder(iconSize);
     }
 
     /// <summary>

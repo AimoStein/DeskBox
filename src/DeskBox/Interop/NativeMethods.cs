@@ -115,7 +115,15 @@ public static class NativeMethods
     public const uint GW_HWNDNEXT = 2;
 
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+
+    /// <summary>对象显示事件：窗口第一次显示 / 重新显示时触发。开机时 Explorer 创建桌面窗口用的就是它。</summary>
+    public const uint EVENT_OBJECT_SHOW = 0x8002;
+
+    /// <summary>对象创建事件。</summary>
+    public const uint EVENT_OBJECT_CREATE = 0x8000;
+
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
     public const int SW_SHOWNOACTIVATE = 4;
 
@@ -270,7 +278,118 @@ public static class NativeMethods
         return sb.ToString();
     }
 
+    /// <summary>GetWindowLongPtr 的宿主：64 位进程用 Ptr 版本，32 位退回普通版本。</summary>
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtr64(IntPtr hwnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLong32(IntPtr hwnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr SetWindowLongPtr64(IntPtr hwnd, int index, IntPtr value);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    private static extern int SetWindowLong32(IntPtr hwnd, int index, int value);
+
+    /// <summary>GWLP_HWNDPARENT 在顶层窗口上就是「owner」，和 SetParent 不是一回事。</summary>
+    public const int GWLP_HWNDPARENT = -8;
+
+    /// <summary>读取窗口的 owner（顶层窗口的 GWLP_HWNDPARENT）。</summary>
+    public static IntPtr GetWindowOwner(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        return IntPtr.Size == 8
+            ? GetWindowLongPtr64(hwnd, GWLP_HWNDPARENT)
+            : new IntPtr(GetWindowLong32(hwnd, GWLP_HWNDPARENT));
+    }
+
+    /// <summary>
+    /// 盒子窗口的 owner 应该挂到哪个窗口上。
+    ///
+    /// 实测：直接挂 Progman 时，只要某个盒子成为前台窗口，Windows 会把「桌面已显示」当成当前状态，
+    /// 再按 Win+D 就什么都不做（任务栏「显示桌面」亦然）。挂到承载桌面图标的 SHELLDLL_DefView
+    /// 上，owner 约束同样能保证 Win+D 时盒子被一起带上去，而且不会让外壳误判桌面状态。
+    /// </summary>
+    public static IntPtr DesktopOwnerWindow()
+    {
+        var defView = FindDesktopDefView();
+        return defView != IntPtr.Zero ? defView : DesktopRoot();
+    }
+
+    /// <summary>
+    /// 把窗口的 owner 设成指定窗口（这里是承载桌面图标的 SHELLDLL_DefView），返回原来的 owner。
+    /// owner 关系由窗口管理器维护：owned 窗口永远在 owner 之上，所以 Win+D 把桌面提起来时，
+    /// 盒子会被一起带上、不会出现「桌面盖住盒子」的那一帧。
+    /// </summary>
+    public static IntPtr SetWindowOwner(IntPtr hwnd, IntPtr owner)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        return IntPtr.Size == 8
+            ? SetWindowLongPtr64(hwnd, GWLP_HWNDPARENT, owner)
+            : new IntPtr(SetWindowLong32(hwnd, GWLP_HWNDPARENT, owner.ToInt32()));
+    }
+
+    /// <summary>
+    /// 一组盒子窗口是不是真的紧贴在桌面根窗口上方（z 序里从桌面根往上依次都是这些盒子）。
+    ///
+    /// 用来在显示桌面结束后自校验：Win+D 恢复时，如果前台的还是某个盒子，系统降下桌面根窗口的
+    /// 时序比前台事件晚几十毫秒，这时按 HWND_BOTTOM 压底会把盒子压到「当时还高高的桌面根」上面，
+    /// 等桌面降下去盒子就停在普通窗口层高处了。所以要过一小段时间再确认一次，必要时重新压底。
+    /// </summary>
+    public static bool AreBoxesAtDesktopLayer(IReadOnlyCollection<IntPtr> handles, IntPtr desktopRoot)
+    {
+        if (desktopRoot == IntPtr.Zero || handles.Count == 0)
+        {
+            return false;
+        }
+
+        var remaining = new HashSet<IntPtr>();
+        foreach (var hwnd in handles)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            {
+                return false;
+            }
+
+            remaining.Add(hwnd);
+        }
+
+        var current = GetWindow(desktopRoot, GW_HWNDPREV);
+        var guard = remaining.Count + 8;
+        while (current != IntPtr.Zero && guard-- > 0)
+        {
+            if (remaining.Remove(current))
+            {
+                if (remaining.Count == 0)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                // 紧挨着桌面根上方的窗口不是盒子：盒子已经飘到普通窗口层里了
+                return false;
+            }
+
+            current = GetWindow(current, GW_HWNDPREV);
+        }
+
+        return remaining.Count == 0;
+    }
+
     /// <summary>把窗口压到最底层（紧贴桌面之上，低于所有普通窗口）。</summary>
+    /// <remarks>
+    /// 窗口有 owner（见 <see cref="SetWindowOwner"/>）时，HWND_BOTTOM 会被窗口管理器约束回
+    /// 「紧贴 owner 上方」——正好还是桌面之上、普通窗口之下，不需要另写一套插入逻辑。
+    /// </remarks>
     public static void PushToBottom(IntPtr hwnd)
     {
         if (hwnd != IntPtr.Zero)

@@ -28,6 +28,8 @@ internal sealed class GlassSurface : IDisposable
     internal Func<GlassParameters> GetParameters { get; }
     internal Action<bool> AvailabilityChanged { get; }
     internal long Draws { get; private set; }
+    internal long LastDrawTick { get; private set; }
+    internal bool HasFrame => Draws > 0;
     internal long LockMisses { get; private set; }
     internal void SaveFrame(string path)
     {
@@ -89,6 +91,7 @@ internal sealed class GlassSurface : IDisposable
             _engine.Draw(capture, _target!, width, height, parameters);
             Image.AddDirtyRect(new Int32Rect(0, 0, width, height));
             Draws++;
+            LastDrawTick = Environment.TickCount64;
             SetAvailable(true);
             return true;
         }

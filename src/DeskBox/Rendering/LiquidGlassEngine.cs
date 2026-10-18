@@ -17,6 +17,9 @@ namespace DeskBox.Rendering;
 /// <summary>Shared GPU device and capture sessions for all desktop boxes. UI-thread owned.</summary>
 internal sealed class LiquidGlassEngine : IDisposable
 {
+    // 捕获会话重建（例如 Win+D 后 Wallpaper Engine 窗口重建）期间暂时没有新帧时，
+    // 最多沿用 GlassSurface 里最后一帧的时长，超过后才回退普通背景。
+    private const long FrameFreezeMs = 4000;
     private static LiquidGlassEngine? _current;
     private readonly List<GlassSurface> _surfaces = new();
     private readonly List<WallpaperCapture> _captures = new();
@@ -58,12 +61,14 @@ internal sealed class LiquidGlassEngine : IDisposable
 
     private LiquidGlassEngine(nint window)
     {
+        var watch = Stopwatch.StartNew();
         try
         {
         if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("Windows 不支持实时画面捕获。");
         Vortice.Direct3D11.D3D11.D3D11CreateDevice((Vortice.DXGI.IDXGIAdapter?)null, DriverType.Hardware,
             DeviceCreationFlags.BgraSupport, [FeatureLevel.Level_11_0], out ID3D11Device device, out ID3D11DeviceContext context).CheckError();
         Device = device; Context = context;
+        var deviceMs = watch.ElapsedMilliseconds;
         _winrtDevice = GlassInterop.CreateWinRtDevice(device);
         _direct9 = D3D9.Direct3DCreate9Ex();
         Device9 = _direct9.CreateDeviceEx(0, DeviceType.Hardware, window,
@@ -74,11 +79,13 @@ internal sealed class LiquidGlassEngine : IDisposable
                 BackBufferWidth = 1, BackBufferHeight = 1, BackBufferFormat = Vortice.Direct3D9.Format.Unknown,
                 PresentationInterval = PresentInterval.Immediate
             });
+        var device9Ms = watch.ElapsedMilliseconds;
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("DeskBox.Rendering.LiquidGlass.hlsl")!;
         var shader = new StreamReader(stream).ReadToEnd();
         _vertex = device.CreateVertexShader(Compiler.Compile(shader, "VS", "LiquidGlass", "vs_5_0").Span);
         _pixel = device.CreatePixelShader(Compiler.Compile(shader, "PS", "LiquidGlass", "ps_5_0").Span);
         _blurPixel = device.CreatePixelShader(Compiler.Compile(shader, "BlurPS", "LiquidGlass", "ps_5_0").Span);
+        var shaderMs = watch.ElapsedMilliseconds;
         _constants = device.CreateBuffer(80, BindFlags.ConstantBuffer);
         _completion = device.CreateQuery(new QueryDescription(Vortice.Direct3D11.QueryType.Event));
         _sampler = device.CreateSamplerState(new SamplerDescription
@@ -89,6 +96,7 @@ internal sealed class LiquidGlassEngine : IDisposable
         _timer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(1000.0 / 30) };
         _timer.Tick += Tick;
         _timer.Start();
+        Log.Info($"[启动] Liquid Glass 引擎初始化 {watch.ElapsedMilliseconds}ms（D3D11 {deviceMs}ms / D3D9Ex {device9Ms - deviceMs}ms / 着色器 {shaderMs - device9Ms}ms），自进程启动 {StartupTrace.SinceProcessStartMs}ms");
         }
         catch { Dispose(); throw; }
     }
@@ -166,8 +174,12 @@ internal sealed class LiquidGlassEngine : IDisposable
                 var bounds = surface.GetBounds();
                 var capture = _captures.Where(c => c.Texture is not null && !c.Closed)
                     .OrderByDescending(c => IntersectionArea(c.Bounds, bounds)).FirstOrDefault();
-                if (capture is null || IntersectionArea(capture.Bounds, bounds) <= 0) surface.SetAvailable(false);
-                else surface.Render(capture);
+                if (capture is not null && IntersectionArea(capture.Bounds, bounds) > 0) { surface.Render(capture); continue; }
+                // 捕获会话可能正在重建（例如 Win+D 后 Wallpaper Engine 窗口重建），期间暂时没有可用纹理。
+                // 此时保留 D3DImage 里已绘制的最后一帧，避免 SetAvailable(false) 让玻璃背景闪一下；
+                // 超过 FrameFreezeMs 仍没有新帧才回退普通背景，防止画面永久卡在旧帧。
+                if (surface.HasFrame && Environment.TickCount64 - surface.LastDrawTick <= FrameFreezeMs) continue;
+                surface.SetAvailable(false);
             }
             Ticks++;
         }
