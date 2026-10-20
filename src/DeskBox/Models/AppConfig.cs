@@ -64,6 +64,7 @@ public sealed class AppConfig
     public bool AutoStart { get; set; }
     public bool HideIconsOnDoubleClick { get; set; } = true;
     public bool HideBoxesWithIcons { get; set; } = true;
+    public bool HideTaskbarWithIcons { get; set; } = true;
     public bool RestoreIconsOnExit { get; set; } = true;
     public bool ShowHiddenFiles { get; set; }
     public bool OrganizeShortcuts { get; set; }

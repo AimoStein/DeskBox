@@ -78,6 +78,7 @@ public partial class SettingsWindow : Window
         {
             ChkAutoStart.IsChecked = AutoStart.IsEnabled;
             ChkDoubleClick.IsChecked = _config.HideIconsOnDoubleClick;
+            ChkHideTaskbar.IsChecked = _config.HideTaskbarWithIcons;
             ChkRestoreIcons.IsChecked = _config.RestoreIconsOnExit;
             ChkHidden.IsChecked = _config.ShowHiddenFiles;
             ChkShortcuts.IsChecked = _config.OrganizeShortcuts;
@@ -110,7 +111,9 @@ public partial class SettingsWindow : Window
 
             BtnUndo.IsEnabled = _config.LastOrganize.Count > 0;
             LblHint.Text = _config.HideIconsOnDoubleClick
-                ? "提示：在桌面空白处双击即可隐藏所有图标和盒子。"
+                ? (_config.HideTaskbarWithIcons
+                    ? "提示：在桌面空白处双击即可隐藏图标、盒子和任务栏，再双击恢复。"
+                    : "提示：在桌面空白处双击即可隐藏所有图标和盒子。")
                 : "提示：托盘图标右键可以快速新建盒子和显示 / 隐藏桌面图标。";
         }
         finally
@@ -162,6 +165,7 @@ public partial class SettingsWindow : Window
         }
 
         _config.HideIconsOnDoubleClick = ChkDoubleClick.IsChecked == true;
+        _config.HideTaskbarWithIcons = ChkHideTaskbar.IsChecked == true;
         _config.RestoreIconsOnExit = ChkRestoreIcons.IsChecked == true;
         _config.ShowHiddenFiles = ChkHidden.IsChecked == true;
         _config.OrganizeShortcuts = ChkShortcuts.IsChecked == true;
