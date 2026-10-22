@@ -118,6 +118,20 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel>
+                                        <TextBlock Text="隐藏图标时同时隐藏任务栏" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="包含所有屏幕；恢复图标或退出程序时恢复任务栏"
+                                                   Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ChkHideTaskbar" Grid.Column="1" Style="{StaticResource SwitchCheck}"
+                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
+                                </Grid>
+
+                                <Grid Margin="0,0,0,14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
                                         <TextBlock Text="退出时恢复桌面图标" Style="{StaticResource RowLabel}" />
                                         <TextBlock Text="防止退出后桌面一直空着" Style="{StaticResource Caption}" />
                                     </StackPanel>

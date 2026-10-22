@@ -59,6 +59,7 @@ public partial class App : Application
     private AppInstance? _instance;
     private TrayService? _tray;
     private DesktopMouseWatcher? _mouseWatcher;
+    private DesktopTaskbar? _taskbar;
     private SettingsWindow? _settings;
     private DispatcherTimer? _saveTimer;
     private NativeMethods.WinEventProc? _foregroundProc;
@@ -259,6 +260,7 @@ public partial class App : Application
         _mouseWatcher = new DesktopMouseWatcher { Enabled = _config.HideIconsOnDoubleClick };
         _mouseWatcher.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.BeginInvoke(ToggleIconsFromUser);
         _mouseWatcher.Start();
+        SyncTaskbarVisibility();
         LogStartupStage("鼠标钩子");
 
         // 右键菜单改由设置窗口承担，这里把历史版本写过的注册项清掉
@@ -1664,8 +1666,12 @@ public partial class App : Application
     private void ToggleIconsFromUser()
     {
         var wantVisible = !_shell.IconsVisible;
-        _shell.SetIconsVisible(wantVisible);
+        if (!_shell.SetIconsVisible(wantVisible))
+        {
+            return;
+        }
         _config.IconsHiddenByApp = !wantVisible;
+        SyncTaskbarVisibility();
 
         if (_config.HideBoxesWithIcons)
         {
@@ -1770,6 +1776,7 @@ public partial class App : Application
 
         _exiting = true;
         _saveTimer?.Stop();
+        _taskbar?.Dispose();
 
         if (_config.RestoreIconsOnExit && _config.IconsHiddenByApp)
         {
@@ -1789,6 +1796,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _taskbar?.Dispose();
         Rendering.LiquidGlassEngine.Shutdown();
         if (_ownsConfig && !_exiting)
         {
@@ -1822,6 +1830,7 @@ public partial class App : Application
     {
         ThemeManager.Apply(_config.Theme);
         _tray?.ApplyTheme();
+        SyncTaskbarVisibility();
 
         if (_mouseWatcher is not null)
         {
@@ -1835,6 +1844,16 @@ public partial class App : Application
         {
             box.RefreshFromConfig(hiddenFilesChanged);
         }
+    }
+
+    private void SyncTaskbarVisibility()
+    {
+        var hidden = _config.HideTaskbarWithIcons && _config.IconsHiddenByApp && !_shell.IconsVisible;
+        if (hidden)
+        {
+            _taskbar ??= new DesktopTaskbar();
+        }
+        _taskbar?.SetHidden(hidden);
     }
 
     private void ScheduleSave()

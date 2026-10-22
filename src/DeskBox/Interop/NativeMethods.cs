@@ -125,6 +125,7 @@ public static class NativeMethods
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
+    public const int SW_HIDE = 0;
     public const int SW_SHOWNOACTIVATE = 4;
 
     public const int GWL_EXSTYLE = -20;
@@ -513,6 +514,25 @@ public static class NativeMethods
 
     /// <summary>这个窗口是不是任务栏相关窗口。</summary>
     public static bool IsShellTrayWindow(IntPtr hwnd) => IsShellTrayClass(ClassNameOf(hwnd));
+
+    /// <summary>只匹配主屏和副屏任务栏，不包括开始菜单或任务栏缩略图。</summary>
+    public static bool IsTaskbarWindow(IntPtr hwnd)
+    {
+        var className = ClassNameOf(hwnd);
+        return className.Equals("Shell_TrayWnd", StringComparison.OrdinalIgnoreCase) ||
+               className.Equals("Shell_SecondaryTrayWnd", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static List<IntPtr> FindTaskbarWindows()
+    {
+        var windows = new List<IntPtr>();
+        EnumWindows((hwnd, _) =>
+        {
+            if (IsTaskbarWindow(hwnd)) windows.Add(hwnd);
+            return true;
+        }, IntPtr.Zero);
+        return windows;
+    }
 
     /// <summary>
     /// 窗口中心点当前是不是被桌面层盖住了（Win+D 之后就是这个状态）。
