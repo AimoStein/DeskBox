@@ -102,10 +102,10 @@ internal sealed class LiquidGlassEngine : IDisposable
     }
 
     internal static GlassSurface Attach(nint window, Func<Rect> bounds, Func<bool> active,
-        Func<GlassParameters> parameters, Action<bool> availability)
+        Func<GlassParameters> parameters, Action<bool> availability, Action recover)
     {
         _current ??= new LiquidGlassEngine(window);
-        var surface = new GlassSurface(_current, bounds, active, parameters, availability);
+        var surface = new GlassSurface(_current, bounds, active, parameters, availability, recover);
         _current._surfaces.Add(surface);
         return surface;
     }
@@ -185,11 +185,20 @@ internal sealed class LiquidGlassEngine : IDisposable
         }
         catch (Exception ex)
         {
-            Log.Warn("Liquid Glass 渲染停止，回退普通背景: " + ex);
-            _timer.Stop();
-            foreach (var surface in _surfaces) surface.SetAvailable(false);
+            RecoverAfterFailure(ex);
         }
         LastTickMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+    }
+
+    // A removed D3D device cannot render again. Release every owner's surface
+    // before their delayed retries attach to a fresh shared engine.
+    internal void RecoverAfterFailure(Exception error)
+    {
+        Log.Warn("Liquid Glass 渲染故障，回退普通背景并自动重建 GPU 服务: " + error);
+        _timer.Stop();
+        var surfaces = _surfaces.ToArray();
+        foreach (var surface in surfaces) surface.SetAvailable(false);
+        foreach (var surface in surfaces) surface.Recover();
     }
 
     private static double IntersectionArea(Rect first, Rect second)

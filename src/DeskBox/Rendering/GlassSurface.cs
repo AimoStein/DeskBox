@@ -27,6 +27,7 @@ internal sealed class GlassSurface : IDisposable
     internal Func<bool> IsActive { get; }
     internal Func<GlassParameters> GetParameters { get; }
     internal Action<bool> AvailabilityChanged { get; }
+    internal Action Recover { get; }
     internal long Draws { get; private set; }
     internal long LastDrawTick { get; private set; }
     internal bool HasFrame => Draws > 0;
@@ -39,10 +40,11 @@ internal sealed class GlassSurface : IDisposable
     private bool _available;
 
     internal GlassSurface(LiquidGlassEngine engine, Func<Rect> bounds, Func<bool> active,
-        Func<GlassParameters> parameters, Action<bool> availability)
+        Func<GlassParameters> parameters, Action<bool> availability, Action recover)
     {
         _engine = engine;
         GetBounds = bounds; IsActive = active; GetParameters = parameters; AvailabilityChanged = availability;
+        Recover = recover;
     }
 
     internal void SetAvailable(bool value)
@@ -110,9 +112,12 @@ internal sealed class GlassSurface : IDisposable
 
     public void Dispose()
     {
-        Image.Lock();
-        try { ReleaseTarget(); }
-        finally { Image.Unlock(); }
-        _engine.Detach(this);
+        try
+        {
+            Image.Lock();
+            try { ReleaseTarget(); }
+            finally { Image.Unlock(); }
+        }
+        finally { _engine.Detach(this); }
     }
 }

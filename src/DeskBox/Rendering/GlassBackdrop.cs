@@ -19,6 +19,7 @@ public sealed class GlassBackdrop : Grid, IDisposable
     private bool _available;
     private float _hover;
     private int _attachRetries;
+    private System.Windows.Threading.DispatcherTimer? _retryTimer;
     public AppConfig? Config { get; set; }
     public bool IsAvailable => _available;
     public event Action<bool>? AvailabilityChanged;
@@ -103,7 +104,7 @@ public sealed class GlassBackdrop : Grid, IDisposable
         {
             _surface = LiquidGlassEngine.Attach(new WindowInteropHelper(_window).Handle,
                 GetScreenBounds, () => IsVisible && _window.IsVisible && Config.LiquidGlassEnabled,
-                GetParameters, SetAvailable);
+                GetParameters, SetAvailable, Recover);
             _image.Source = _surface.Image;
             if (watch is not null)
             {
@@ -115,22 +116,32 @@ public sealed class GlassBackdrop : Grid, IDisposable
             Log.Warn("Liquid Glass 初始化失败: " + ex);
             SetAvailable(false);
 
-            // 登录任务可能比显卡驱动 / 桌面合成更早启动：启动阶段初始化失败先重试几次。
-            if (Services.StartupTrace.IsStartup && _attachRetries < 3)
-            {
-                _attachRetries++;
-                var delay = 700 * _attachRetries;
-                _ = Task.Delay(delay).ContinueWith(_ => Dispatcher.BeginInvoke(
-                    new Action(() =>
-                    {
-                        if (_surface is null)
-                        {
-                            Attach();
-                        }
-                    }),
-                    System.Windows.Threading.DispatcherPriority.Background));
-            }
+            ScheduleRetry();
         }
+    }
+
+    private void Recover()
+    {
+        Detach();
+        ScheduleRetry();
+    }
+
+    private void ScheduleRetry()
+    {
+        if (_retryTimer is not null || !IsLoaded || Config?.LiquidGlassEnabled != true) return;
+        // Driver recovery may take time. Retry outside the failed render stack,
+        // backing off to 30 seconds while leaving normal rendering unchanged.
+        _retryTimer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, Math.Min(_attachRetries++, 5))))
+        };
+        _retryTimer.Tick += (_, _) =>
+        {
+            _retryTimer.Stop();
+            _retryTimer = null;
+            Attach();
+        };
+        _retryTimer.Start();
     }
 
     private Rect GetScreenBounds()
@@ -159,6 +170,7 @@ public sealed class GlassBackdrop : Grid, IDisposable
 
     private void SetAvailable(bool available)
     {
+        if (available) _attachRetries = 0;
         Opacity = available ? 1 : 0;
         if (_available == available) return;
         _available = available;
@@ -167,8 +179,13 @@ public sealed class GlassBackdrop : Grid, IDisposable
 
     private void Detach()
     {
+        _retryTimer?.Stop();
+        _retryTimer = null;
         _image.Source = null;
-        _surface?.Dispose(); _surface = null;
+        var surface = _surface;
+        _surface = null;
+        try { surface?.Dispose(); }
+        catch (Exception ex) { Log.Warn("Liquid Glass 释放故障表面: " + ex.Message); }
         SetAvailable(false);
         _window = null;
     }

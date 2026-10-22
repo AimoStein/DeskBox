@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -35,6 +36,7 @@ internal static class GlassSmokeTest
         var second = 0;
         long previousFrames = 0;
         long[]? previousDraws = null;
+        LiquidGlassEngine? failedEngine = null;
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         timer.Tick += (_, _) =>
         {
@@ -112,8 +114,45 @@ internal static class GlassSmokeTest
                     AppearanceTest.Run(engine, windows, config, output, Check);
                     break;
                 case 14:
-                    timer.Stop();
+                    failedEngine = engine;
+                    StartupTrace.IsStartup = false;
+                    config.BoxOpacity = 0;
+                    foreach (var window in windows) window.RefreshFromConfig(false);
+                    // Exercise the production failure handler with the HRESULT seen in
+                    // the user's log, without resetting the machine's graphics driver.
+                    engine!.RecoverAfterFailure(new COMException("模拟 GPU 设备丢失", unchecked((int)0x887A0005)));
+                    Check("设备丢失后释放旧 GPU 服务", LiquidGlassEngine.Current is null);
+                    Check("设备丢失时暂时回退背景", windows.All(w => !((GlassBackdrop)w.FindName("GlassBackground")).IsAvailable));
+                    Check("复现零浓度配置下玻璃丢失后的透明底色", windows.All(w =>
+                        ((Border)w.FindName("Backdrop")).Opacity == 0));
+                    break;
+                case 17:
+                    Check("设备丢失后自动创建新引擎", engine is not null && !ReferenceEquals(engine, failedEngine));
+                    Check("设备丢失后恢复两盒子的实际玻璃画面", windows.All(w =>
+                        ((GlassBackdrop)w.FindName("GlassBackground")).IsAvailable
+                        && GlassPreview.HasVisibleGlass((GlassBackdrop)w.FindName("GlassBackground"))));
+                    Check("恢复后保持原来的细边框", windows.All(w =>
+                        ((Border)w.FindName("Frame")).BorderThickness == new Thickness(1)
+                        && ((System.Windows.Media.SolidColorBrush)((Border)w.FindName("Frame")).BorderBrush).Color
+                            == System.Windows.Media.Color.FromArgb(48, 255, 255, 255)));
+                    GlassPreview.SaveVisual(windows[0], Path.Combine(output, "device-recovered-original-outline.png"));
+                    engine!.RecoverAfterFailure(new COMException("模拟再次丢失设备", unchecked((int)0x887A0005)));
+                    config.LiquidGlassEnabled = false;
+                    foreach (var window in windows) window.RefreshFromConfig(false);
+                    break;
+                case 19:
+                    Check("恢复等待期间关闭玻璃会取消重试", LiquidGlassEngine.Current is null);
+                    config.LiquidGlassEnabled = true;
+                    foreach (var window in windows) window.RefreshFromConfig(false);
+                    break;
+                case 21:
+                    Check("取消重试后仍可重新开启玻璃", windows.All(w =>
+                        ((GlassBackdrop)w.FindName("GlassBackground")).IsAvailable));
+                    engine!.RecoverAfterFailure(new COMException("模拟退出前设备丢失", unchecked((int)0x887A0005)));
                     foreach (var window in windows) window.Close();
+                    break;
+                case 23:
+                    timer.Stop();
                     Check("关闭全部盒子释放 GPU 服务", LiquidGlassEngine.Current is null);
                     report.Add($"failures={failures}");
                     File.WriteAllLines(Path.Combine(output, "smoke.txt"), report);
