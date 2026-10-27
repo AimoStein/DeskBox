@@ -19,7 +19,7 @@
     <Company>DeskBox</Company>
     <Copyright>Copyright (c) 2026 Aimo (MIT License)</Copyright>
     <Description>Offline desktop organizer: partition boxes, one-click tidy up, icon hiding.</Description>
-    <Version>1.4.9</Version>
+    <Version>1.4.13</Version>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
     <InvariantGlobalization>false</InvariantGlobalization>
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
@@ -30,14 +30,7 @@
     <PackageReference Include="Vortice.Direct3D9" Version="3.6.2" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.6.2" />
     <EmbeddedResource Include="Rendering\LiquidGlass.hlsl" />
-    <EmbeddedResource Include="obj\$(Configuration)\native\DeskBox.Taskbar.dll" LogicalName="DeskBox.Taskbar.dll" />
   </ItemGroup>
-
-  <Target Name="BuildTaskbarBridge" BeforeTargets="PrepareForBuild"
-          Inputs="$(MSBuildProjectDirectory)\..\DeskBox.Taskbar\TaskbarGlass.cpp;$(MSBuildProjectDirectory)\..\..\tools\build-taskbar-native.ps1"
-          Outputs="$(MSBuildProjectDirectory)\obj\$(Configuration)\native\DeskBox.Taskbar.dll">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\tools\build-taskbar-native.ps1&quot; -Output &quot;$(MSBuildProjectDirectory)\obj\$(Configuration)\native\DeskBox.Taskbar.dll&quot;" />
-  </Target>
 
   <!-- WinForms 会引入 System.Drawing / System.Windows.Forms 的隐式 using，和 WPF 类型冲突，这里去掉 -->
   <ItemGroup>

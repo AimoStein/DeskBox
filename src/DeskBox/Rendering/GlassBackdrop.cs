@@ -21,9 +21,6 @@ public sealed class GlassBackdrop : Grid, IDisposable
     private int _attachRetries;
     private System.Windows.Threading.DispatcherTimer? _retryTimer;
     public AppConfig? Config { get; set; }
-    public double? CornerRadiusOverride { get; set; }
-    public Func<bool>? EnabledOverride { get; set; }
-    private bool GlassEnabled => EnabledOverride?.Invoke() ?? Config?.LiquidGlassEnabled == true;
     public bool IsAvailable => _available;
     public event Action<bool>? AvailabilityChanged;
 
@@ -93,20 +90,20 @@ public sealed class GlassBackdrop : Grid, IDisposable
 
     public void Refresh()
     {
-        if (GlassEnabled) Attach();
+        if (Config?.LiquidGlassEnabled == true) Attach();
         else Detach();
     }
 
     private void Attach()
     {
-        if (_surface is not null || !IsLoaded || Config is null || !GlassEnabled) return;
+        if (_surface is not null || !IsLoaded || Config?.LiquidGlassEnabled != true) return;
         _window = Window.GetWindow(this);
         if (_window is null) return;
         var watch = StartupTrace.IsStartup ? System.Diagnostics.Stopwatch.StartNew() : null;
         try
         {
             _surface = LiquidGlassEngine.Attach(new WindowInteropHelper(_window).Handle,
-                GetScreenBounds, () => IsVisible && _window.IsVisible && GlassEnabled,
+                GetScreenBounds, () => IsVisible && _window.IsVisible && Config.LiquidGlassEnabled,
                 GetParameters, SetAvailable, Recover);
             _image.Source = _surface.Image;
             if (watch is not null)
@@ -131,7 +128,7 @@ public sealed class GlassBackdrop : Grid, IDisposable
 
     private void ScheduleRetry()
     {
-        if (_retryTimer is not null || !IsLoaded || !GlassEnabled) return;
+        if (_retryTimer is not null || !IsLoaded || Config?.LiquidGlassEnabled != true) return;
         // Driver recovery may take time. Retry outside the failed render stack,
         // backing off to 30 seconds while leaving normal rendering unchanged.
         _retryTimer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Background)
@@ -163,7 +160,7 @@ public sealed class GlassBackdrop : Grid, IDisposable
         _hover += ((_window?.IsMouseOver == true ? 1f : 0f) - _hover) * 0.18f;
         return new GlassParameters
         {
-            Shape = new Vector4(0, 0, (float)((CornerRadiusOverride ?? config.CornerRadius) * dpi), (float)(RefractionBandWidth * dpi)),
+            Shape = new Vector4(0, 0, (float)(config.CornerRadius * dpi), (float)(RefractionBandWidth * dpi)),
             Material = new Vector4((float)(config.GlassBlur * dpi), (float)(config.GlassRefraction * dpi),
                 (float)config.BoxOpacity, ThemeManager.IsDark ? 1 : 0),
             Pointer = new Vector4((float)(mouse.X / Math.Max(ActualWidth, 1)),

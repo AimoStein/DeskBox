@@ -210,20 +210,6 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <StackPanel>
-                                        <TextBlock Text="任务栏玻璃背景" Style="{StaticResource RowLabel}" />
-                                        <TextBlock Text="原任务栏使用同款直角玻璃，共用浓度、模糊和折射参数" Style="{StaticResource Caption}" />
-                                        <TextBlock x:Name="LblTaskbarGlassStatus" Text="关闭后恢复系统外观" Style="{StaticResource Caption}" />
-                                    </StackPanel>
-                                    <CheckBox x:Name="ChkTaskbarGlass" Grid.Column="1" Style="{StaticResource SwitchCheck}"
-                                              VerticalAlignment="Center" Checked="Toggle_Changed" Unchecked="Toggle_Changed" />
-                                </Grid>
-
-                                <Grid Margin="0,0,0,16">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
                                     <TextBlock Text="主题" Style="{StaticResource RowLabel}" />
                                     <Border Grid.Column="1" Background="{DynamicResource InputBgBrush}"
                                             CornerRadius="8" Padding="3">
