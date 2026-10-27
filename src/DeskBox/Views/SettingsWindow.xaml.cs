@@ -36,6 +36,8 @@ public partial class SettingsWindow : Window
     /// <summary>需要 App 处理的动作，比如打开目录、撤销整理。</summary>
     public event Action<string>? CommandRequested;
 
+    public void SetTaskbarGlassStatus(string status) => LblTaskbarGlassStatus.Text = status;
+
     public void RefreshState()
     {
         LoadValues();
@@ -85,6 +87,7 @@ public partial class SettingsWindow : Window
             ChkAlign.IsChecked = _config.AutoAlignBoxes;
             ChkAvoidOverlap.IsChecked = _config.AvoidBoxOverlap;
             ChkGlass.IsChecked = _config.LiquidGlassEnabled;
+            ChkTaskbarGlass.IsChecked = _config.TaskbarGlassEnabled;
             SlGlassBlur.Value = _config.GlassBlur;
             SlGlassRefraction.Value = _config.GlassRefraction;
             LblGlassBlur.Text = $"{_config.GlassBlur:0.0}";
@@ -172,6 +175,7 @@ public partial class SettingsWindow : Window
         _config.AutoAlignBoxes = ChkAlign.IsChecked == true;
         _config.AvoidBoxOverlap = ChkAvoidOverlap.IsChecked == true;
         _config.LiquidGlassEnabled = ChkGlass.IsChecked == true;
+        _config.TaskbarGlassEnabled = ChkTaskbarGlass.IsChecked == true;
 
         if (ChkAutoStart.IsChecked == true != AutoStart.IsEnabled)
         {

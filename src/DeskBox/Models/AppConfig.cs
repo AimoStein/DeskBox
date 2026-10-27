@@ -58,6 +58,7 @@ public sealed class AppConfig
     public double IconSize { get; set; } = 37;
     public double CornerRadius { get; set; } = 22;
     public bool LiquidGlassEnabled { get; set; } = true;
+    public bool TaskbarGlassEnabled { get; set; }
     public double GlassBlur { get; set; } = 0;
     public double GlassRefraction { get; set; } = 28;
 

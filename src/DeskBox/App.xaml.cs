@@ -60,6 +60,7 @@ public partial class App : Application
     private TrayService? _tray;
     private DesktopMouseWatcher? _mouseWatcher;
     private DesktopTaskbar? _taskbar;
+    private TaskbarGlass? _taskbarGlass;
     private SettingsWindow? _settings;
     private DispatcherTimer? _saveTimer;
     private NativeMethods.WinEventProc? _foregroundProc;
@@ -102,6 +103,13 @@ public partial class App : Application
         if (glassSmoke is not null)
         {
             Rendering.GlassSmokeTest.Run(glassSmoke["--glass-smoketest=".Length..]);
+            return;
+        }
+
+        var taskbarProbe = e.Args.FirstOrDefault(a => a.StartsWith("--taskbar-glass-probe=", StringComparison.OrdinalIgnoreCase));
+        if (taskbarProbe is not null)
+        {
+            Rendering.TaskbarGlassProbe.Run(taskbarProbe["--taskbar-glass-probe=".Length..]);
             return;
         }
 
@@ -1522,6 +1530,7 @@ public partial class App : Application
             var output = paths ?? Path.Combine(Path.GetTempPath(), "DeskBoxGlassDiagnostic");
             Directory.CreateDirectory(output);
             Rendering.LiquidGlassEngine.Current?.SaveDiagnostics(output);
+            File.WriteAllText(Path.Combine(output, "taskbar.txt"), _taskbarGlass?.Status ?? "off");
             foreach (var box in _boxes.Where(b => b.IsVisible))
                 Rendering.GlassPreview.SaveVisual(box, Path.Combine(output, $"box-{box.Config.Id}.png"));
             Log.Info($"玻璃诊断已导出：{output}");
@@ -1734,6 +1743,7 @@ public partial class App : Application
         if (_settings is null)
         {
             _settings = new SettingsWindow(_config);
+            _settings.SetTaskbarGlassStatus(_taskbarGlass?.UserStatus ?? "关闭后恢复系统外观");
             _settings.Applied += (_, _) =>
             {
                 ApplyConfig();
@@ -1776,6 +1786,7 @@ public partial class App : Application
 
         _exiting = true;
         _saveTimer?.Stop();
+        _taskbarGlass?.Dispose();
         _taskbar?.Dispose();
 
         if (_config.RestoreIconsOnExit && _config.IconsHiddenByApp)
@@ -1796,6 +1807,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _taskbarGlass?.Dispose();
         _taskbar?.Dispose();
         Rendering.LiquidGlassEngine.Shutdown();
         if (_ownsConfig && !_exiting)
@@ -1854,6 +1866,12 @@ public partial class App : Application
             _taskbar ??= new DesktopTaskbar();
         }
         _taskbar?.SetHidden(hidden);
+        if (_config.TaskbarGlassEnabled && _taskbarGlass is null)
+        {
+            _taskbarGlass = new TaskbarGlass(_config);
+            _taskbarGlass.StatusChanged += status => _settings?.SetTaskbarGlassStatus(status);
+        }
+        _taskbarGlass?.Refresh(hidden);
     }
 
     private void ScheduleSave()
