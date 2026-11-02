@@ -106,7 +106,8 @@ internal static class IconLoader
             // 拿不到时间戳就用 0
         }
 
-        return $"{path}|{size}|{ticks}";
+        return $"{path}|{size}|{ticks}" +
+            (InternetShortcutIcon.IsShortcut(path) ? InternetShortcutIcon.CacheSignature(path) : "");
     }
 
     /// <summary>只查内存缓存，立即返回，绝不碰 shell 或磁盘。</summary>
@@ -392,6 +393,12 @@ internal static class IconLoader
             if (!FsUtil.PathExists(path))
             {
                 return null;
+            }
+
+            if (InternetShortcutIcon.IsShortcut(path))
+            {
+                var explicitIcon = InternetShortcutIcon.Load(path, size);
+                if (explicitIcon is not null) return explicitIcon;
             }
 
             NativeMethods.SHCreateItemFromParsingName(path, IntPtr.Zero, IidShellItemImageFactory, out var factory);

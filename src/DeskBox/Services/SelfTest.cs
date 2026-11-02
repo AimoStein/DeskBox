@@ -44,6 +44,35 @@ public static class SelfTest
 
             Directory.CreateDirectory(desktop);
 
+            // 模拟 OneDrive 桌面迁移：旧空目录不能遮住新位置，独立目录不能误绑定。
+            var redirectedDesktop = Path.Combine(sandbox, "OneDrive", "Desktop");
+            var migrationDesktop = Path.Combine(sandbox, "old-desktop");
+            var oldRoot = Path.Combine(migrationDesktop, "桌面整理");
+            var newRoot = Path.Combine(redirectedDesktop, "桌面整理");
+            var migration = new AppConfig { BoxRoot = oldRoot, Boxes = new()
+            {
+                new() { Title = "已迁移", Folder = Path.Combine(oldRoot, "已迁移") },
+                new() { Title = "旧空目录", Folder = Path.Combine(oldRoot, "旧空目录") },
+                new() { Title = "仍有文件", Folder = Path.Combine(oldRoot, "仍有文件") },
+                new() { Title = "尚未到达", Folder = Path.Combine(oldRoot, "尚未到达") },
+                new() { Title = "独立目录", Folder = Path.Combine(sandbox, "独立目录") },
+            } };
+            foreach (var name in new[] { "已迁移", "旧空目录", "仍有文件" })
+                Directory.CreateDirectory(Path.Combine(newRoot, name));
+            Directory.CreateDirectory(migration.Boxes[1].Folder);
+            Directory.CreateDirectory(migration.Boxes[2].Folder);
+            File.WriteAllText(Path.Combine(migration.Boxes[2].Folder, "保留.txt"), "keep");
+            Check("迁移-恢复目录", DesktopFolderRecovery.Recover(migration, migrationDesktop, redirectedDesktop));
+            Check("迁移-缺失目录重绑", migration.Boxes[0].Folder == Path.Combine(newRoot, "已迁移"));
+            Check("迁移-空目录重绑", migration.Boxes[1].Folder == Path.Combine(newRoot, "旧空目录"));
+            Check("迁移-保留非空旧目录", migration.Boxes[2].Folder == Path.Combine(oldRoot, "仍有文件"));
+            Check("迁移-目标未到达保留配置", migration.Boxes[3].Folder == Path.Combine(oldRoot, "尚未到达") && migration.BoxRoot == oldRoot);
+            Check("迁移-独立目录不变", migration.Boxes[4].Folder == Path.Combine(sandbox, "独立目录"));
+            Directory.CreateDirectory(Path.Combine(newRoot, "尚未到达"));
+            Check("迁移-延迟到达可重试", DesktopFolderRecovery.Recover(migration, migrationDesktop, redirectedDesktop) && migration.Boxes[3].Folder == Path.Combine(newRoot, "尚未到达"));
+            Check("迁移-重复检查不修改", !DesktopFolderRecovery.Recover(migration, migrationDesktop, redirectedDesktop));
+            Check("迁移-旧文件未移动", File.ReadAllText(Path.Combine(oldRoot, "仍有文件", "保留.txt")) == "keep");
+
             var samples = new[]
             {
                 "合同.docx", "照片.png", "片子.mp4", "资料.zip",
@@ -1123,6 +1152,52 @@ public static class SelfTest
             }
 
             IconCache.Clear();
+            var urlIcon = Path.Combine(iconProbeDir, "游戏图标.ico");
+            var urlProbe = Path.Combine(iconProbeDir, "游戏.url");
+            void WriteSolidIcon(byte red, byte blue)
+            {
+                using var writer = new BinaryWriter(File.Create(urlIcon));
+                writer.Write((ushort)0); writer.Write((ushort)1); writer.Write((ushort)1);
+                writer.Write((byte)16); writer.Write((byte)16); writer.Write((byte)0); writer.Write((byte)0);
+                writer.Write((ushort)1); writer.Write((ushort)32); writer.Write(1128u); writer.Write(22u);
+                writer.Write(40u); writer.Write(16); writer.Write(32);
+                writer.Write((ushort)1); writer.Write((ushort)32); writer.Write(0u); writer.Write(1024u);
+                writer.Write(0); writer.Write(0); writer.Write(0u); writer.Write(0u);
+                for (var pixel = 0; pixel < 256; pixel++)
+                {
+                    writer.Write(blue); writer.Write((byte)0); writer.Write(red); writer.Write((byte)255);
+                }
+                writer.Write(new byte[64]);
+            }
+            bool HasColor(System.Windows.Media.Imaging.BitmapSource? source, byte red, byte blue)
+            {
+                if (source is null) return false;
+                var converted = new System.Windows.Media.Imaging.FormatConvertedBitmap(source,
+                    System.Windows.Media.PixelFormats.Bgra32, null, 0);
+                var pixel = new byte[4];
+                converted.CopyPixels(new Int32Rect(source.PixelWidth / 2, source.PixelHeight / 2, 1, 1), pixel, 4, 0);
+                // Windows 放大 HICON 时可能把 255 插值成 254。
+                var matches = Math.Abs(pixel[0] - blue) <= 2 && Math.Abs(pixel[2] - red) <= 2 && pixel[3] >= 253;
+                if (!matches)
+                    report.AppendLine($"[INFO] URL图标像素：{string.Join(",", pixel)}，尺寸 {source.PixelWidth}x{source.PixelHeight}");
+                return matches;
+            }
+            WriteSolidIcon(255, 0);
+            File.WriteAllText(urlProbe, "[Other]\nIconFile=wrong.ico\n[InternetShortcut]\nURL=steam://rungameid/123\nIconIndex=0\nIconFile=\"游戏图标.ico\"\n");
+            var urlKey = IconLoader.BuildKey(urlProbe, iconSize);
+            Check("URL图标-相对路径及分区解析", InternetShortcutIcon.ReadLocation(urlProbe)?.Path == urlIcon);
+            Check("URL图标-优先使用指定图标像素", HasColor(IconCache.Get(urlProbe, iconSize), 255, 0));
+            IconCache.Clear();
+            Check("URL图标-磁盘缓存保留正确像素", HasColor(IconCache.Get(urlProbe, iconSize), 255, 0));
+            WriteSolidIcon(0, 255);
+            File.SetLastWriteTimeUtc(urlIcon, DateTime.UtcNow.AddSeconds(2));
+            Check("URL图标-来源变化使缓存失效", IconLoader.BuildKey(urlProbe, iconSize) != urlKey);
+            Check("URL图标-来源更新后显示新像素", HasColor(IconCache.Get(urlProbe, iconSize), 0, 255));
+            File.WriteAllText(urlProbe, "[InternetShortcut]\nURL=steam://rungameid/123\nIconFile=missing.ico\n");
+            Check("URL图标-缺失图标安全回退", InternetShortcutIcon.Load(urlProbe, iconSize) is null && IconCache.Get(urlProbe, iconSize) is not null);
+            File.WriteAllText(urlProbe, "[InternetShortcut]\nIconFile=https://example.com/icon.ico\n");
+            Check("URL图标-不读取远程图标", InternetShortcutIcon.ReadLocation(urlProbe) is null);
+
             var probeIcon = IconCache.Get(iconProbe, iconSize);
             Check("图标-首次取图非空", probeIcon is not null);
             Check("图标-位图已冻结可跨线程", probeIcon is null || probeIcon.IsFrozen);

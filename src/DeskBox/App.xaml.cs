@@ -62,6 +62,7 @@ public partial class App : Application
     private DesktopTaskbar? _taskbar;
     private SettingsWindow? _settings;
     private DispatcherTimer? _saveTimer;
+    private DispatcherTimer? _folderRecoveryTimer;
     private NativeMethods.WinEventProc? _foregroundProc;
     private IntPtr _foregroundHook;
     private NativeMethods.WinEventProc? _desktopShowProc;
@@ -145,6 +146,7 @@ public partial class App : Application
         };
 
         _config = ConfigStore.Load();
+        if (DesktopFolderRecovery.Recover(_config)) ConfigStore.Save(_config);
         _lastShowHiddenFiles = _config.ShowHiddenFiles;
         LogStartupStage($"配置读取（盒子 {_config.Boxes.Count} 个）");
 
@@ -176,6 +178,18 @@ public partial class App : Application
             _saveTimer!.Stop();
             ConfigStore.Save(_config);
         };
+
+        _folderRecoveryTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(5),
+        };
+        _folderRecoveryTimer.Tick += (_, _) =>
+        {
+            if (_exiting || !DesktopFolderRecovery.Recover(_config)) return;
+            foreach (var box in _boxes) box.RefreshFromConfig(reloadItems: true);
+            ConfigStore.Save(_config);
+        };
+        _folderRecoveryTimer.Start();
 
         var firstRun = _config.FirstRun;
         if (firstRun)
@@ -1084,8 +1098,7 @@ public partial class App : Application
         {
             if (string.IsNullOrWhiteSpace(boxConfig.Folder) || !Directory.Exists(boxConfig.Folder))
             {
-                Log.Warn($"盒子目录不存在，移除盒子记录：{boxConfig.Title}");
-                _config.Boxes.Remove(boxConfig);
+                Log.Warn($"盒子目录暂不可用，保留盒子记录：{boxConfig.Title}");
                 continue;
             }
 
@@ -1796,6 +1809,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _folderRecoveryTimer?.Stop();
         _taskbar?.Dispose();
         Rendering.LiquidGlassEngine.Shutdown();
         if (_ownsConfig && !_exiting)

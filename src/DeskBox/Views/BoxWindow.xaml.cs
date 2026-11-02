@@ -195,6 +195,7 @@ public partial class BoxWindow : Window
 
         if (reloadItems)
         {
+            AttachWatcher();
             ReloadItems();
         }
         else
@@ -799,6 +800,7 @@ public partial class BoxWindow : Window
         catch (Exception ex)
         {
             Log.Warn($"读取盒子内容失败 {Folder}: {ex.Message}");
+            return; // 临时不可读时保留已有条目，不把整盒显示清空。
         }
 
         paths.Sort((a, b) =>
