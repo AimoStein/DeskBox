@@ -62,6 +62,7 @@ public sealed class AppConfig
     public double GlassRefraction { get; set; } = 28;
 
     public bool AutoStart { get; set; }
+    public bool AutoCheckForUpdates { get; set; } = true;
     public bool HideIconsOnDoubleClick { get; set; } = true;
     public bool HideBoxesWithIcons { get; set; } = true;
     public bool HideTaskbarWithIcons { get; set; } = true;

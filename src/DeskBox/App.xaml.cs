@@ -72,6 +72,9 @@ public partial class App : Application
 
     /// <summary>只有真正持有单实例锁的进程才有权写配置，否则第二次启动会把配置覆盖成默认值。</summary>
     private bool _ownsConfig;
+    private readonly UpdateService _updates = new();
+    private DispatcherTimer? _updateTimer;
+    private Version? _notifiedUpdateVersion;
 
     public App()
     {
@@ -293,6 +296,16 @@ public partial class App : Application
         // 老版本用 HKCU Run 自启，开机会被 Windows 延后几十秒；这里后台迁移到任务计划程序的登录任务。
         var autoStart = _config.AutoStart;
         _ = Task.Run(() => AutoStart.EnsureCurrent(autoStart));
+
+        _updates.Changed += () => _settings?.SetUpdateState(_updates);
+        // 网络检查推迟到首帧之后，不占用开机显示盒子的关键路径。
+        _updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        _updateTimer.Tick += async (_, _) =>
+        {
+            _updateTimer.Interval = TimeSpan.FromHours(24);
+            if (_config.AutoCheckForUpdates && !_exiting) await CheckForUpdatesAsync();
+        };
+        _updateTimer.Start();
 
         if (args.Length > 0)
         {
@@ -1446,6 +1459,24 @@ public partial class App : Application
                 ShowAbout();
                 break;
 
+            case "checkupdates":
+                ShowSettings();
+                _settings?.ScrollToUpdates();
+                _ = CheckForUpdatesAsync();
+                break;
+
+            case "installupdate":
+                _ = InstallUpdateAsync();
+                break;
+
+            case "cancelupdate":
+                _updates.Cancel();
+                break;
+
+            case "releases":
+                SettingsWindow.OpenPath(UpdateService.RepositoryUrl + "/releases/latest");
+                break;
+
             case "openroot":
                 FsUtil.OpenFolder(_config.EffectiveBoxRoot);
                 break;
@@ -1762,7 +1793,23 @@ public partial class App : Application
         }
 
         _settings.RefreshState();
+        _settings.SetUpdateState(_updates);
         _settings.BringToFront();
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        await _updates.CheckAsync();
+        if (!_exiting && _updates.AvailableRelease is { } release && _notifiedUpdateVersion != release.Version)
+        {
+            _notifiedUpdateVersion = release.Version;
+            _tray?.ShowInfo("DeskBox 有新版本", $"版本 {release.Version.ToString(3)} 已发布，可在设置 → 版本更新中下载并重启更新。");
+        }
+    }
+
+    private async Task InstallUpdateAsync()
+    {
+        if (await _updates.PrepareInstallAsync() && !_exiting) ExitApp();
     }
 
     private static void ShowAbout()
@@ -1772,7 +1819,7 @@ public partial class App : Application
         System.Windows.MessageBox.Show(
             $"DeskBox v{version}\n\n" +
             "离线桌面整理工具：分区盒子、一键整理、双击隐藏图标、桌面右键菜单。\n\n" +
-            "· 不联网、无账号、无同步、无遥测\n" +
+            "· 仅检查和下载更新时联网，无账号、无同步、无遥测\n" +
             "· 盒子对应磁盘上的真实文件夹，拆除盒子不会删除文件\n" +
             "· 配置位置：exe 旁边的 config.json（不可写时回退到 %AppData%\\DeskBox\\）",
             "关于 DeskBox",
@@ -1810,6 +1857,8 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _folderRecoveryTimer?.Stop();
+        _updateTimer?.Stop();
+        _updates.Dispose();
         _taskbar?.Dispose();
         Rendering.LiquidGlassEngine.Shutdown();
         if (_ownsConfig && !_exiting)

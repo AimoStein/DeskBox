@@ -28,6 +28,7 @@ public sealed class TrayService : IDisposable
         ItemBoxRoot = Add("打开盒子文件夹", "openroot");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
         Add("设置", "settings");
+        Add("检查更新", "checkupdates");
         Add("关于", "about");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
         Add("退出", "exit");
@@ -43,6 +44,7 @@ public sealed class TrayService : IDisposable
         };
 
         _notifyIcon.DoubleClick += (_, _) => Command?.Invoke("settings");
+        _notifyIcon.BalloonTipClicked += (_, _) => Command?.Invoke("settings");
     }
 
     public event Action<string>? Command;

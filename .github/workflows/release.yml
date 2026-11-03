@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content src/DeskBox/DeskBox.csproj
+          $version = $project.Project.PropertyGroup.Version | Where-Object { $_ }
+          if ($env:GITHUB_REF_NAME -cne "v$version") { throw 'Tag must match the project version.' }
+      - name: Publish portable executable
+        shell: pwsh
+        run: |
+          dotnet publish src/DeskBox/DeskBox.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o release
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
+          $hash = (Get-FileHash release/DeskBox.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  DeskBox.exe" | Set-Content release/SHA256SUMS.txt -Encoding ascii
+          [xml]$project = Get-Content src/DeskBox/DeskBox.csproj
+          $version = $project.Project.PropertyGroup.Version | Where-Object { $_ }
+          @{
+            schema_version = 1
+            version = "$version"
+            download_url = "https://github.com/AimoStein/DeskBox/releases/download/v$version/DeskBox.exe"
+            size = (Get-Item release/DeskBox.exe).Length
+            sha256 = $hash
+          } | ConvertTo-Json | Set-Content release/update.json -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeskBox-win-x64
+          path: |
+            release/DeskBox.exe
+            release/SHA256SUMS.txt
+            release/update.json
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "docs/releases/$env:GITHUB_REF_NAME.md"
+          $noteArguments = if (Test-Path -LiteralPath $notes) { @('--notes-file', $notes) } else { @('--generate-notes') }
+          gh release create $env:GITHUB_REF_NAME release/DeskBox.exe release/SHA256SUMS.txt release/update.json --verify-tag --title "DeskBox $env:GITHUB_REF_NAME" @noteArguments
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }

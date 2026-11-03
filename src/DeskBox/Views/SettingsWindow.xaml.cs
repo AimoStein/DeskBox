@@ -13,7 +13,7 @@ public partial class SettingsWindow : Window
 {
     private readonly AppConfig _config;
     private bool _loading;
-    private bool _scrolledToTop;
+    private string _section = "icons";
 
     public SettingsWindow(AppConfig config)
     {
@@ -27,6 +27,7 @@ public partial class SettingsWindow : Window
         Loaded += (_, _) =>
         {
             LoadValues();
+            SelectSection(_section);
         };
     }
 
@@ -59,16 +60,6 @@ public partial class SettingsWindow : Window
         {
             Interop.NativeMethods.SetForegroundWindow(handle);
         }
-
-        if (!_scrolledToTop)
-        {
-            _scrolledToTop = true;
-
-            // 焦点定位会触发 BringIntoView 把内容滚下去，等布局稳定后再拉回顶部
-            Dispatcher.BeginInvoke(
-                new Action(() => Scroller.ScrollToTop()),
-                System.Windows.Threading.DispatcherPriority.ContextIdle);
-        }
     }
 
     private void LoadValues()
@@ -77,6 +68,7 @@ public partial class SettingsWindow : Window
         try
         {
             ChkAutoStart.IsChecked = AutoStart.IsEnabled;
+            ChkAutoCheckUpdates.IsChecked = _config.AutoCheckForUpdates;
             ChkDoubleClick.IsChecked = _config.HideIconsOnDoubleClick;
             ChkHideTaskbar.IsChecked = _config.HideTaskbarWithIcons;
             ChkRestoreIcons.IsChecked = _config.RestoreIconsOnExit;
@@ -103,7 +95,8 @@ public partial class SettingsWindow : Window
             LblRadius.Text = $"{SlRadius.Value:0} px";
 
             var version = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
-            LblVersion.Text = $"版本 {version.ToString(3)} · {ContextMenuRegistrar.ExecutablePath}";
+            LblVersion.Text = $"版本 {version.ToString(3)}";
+            LblSidebarVersion.Text = $"简桌 · {version.ToString(3)}";
 
             LblLastOrganize.Text = string.IsNullOrEmpty(_config.LastOrganizeTime)
                 ? "还没有整理记录。"
@@ -165,6 +158,7 @@ public partial class SettingsWindow : Window
         }
 
         _config.HideIconsOnDoubleClick = ChkDoubleClick.IsChecked == true;
+        _config.AutoCheckForUpdates = ChkAutoCheckUpdates.IsChecked == true;
         _config.HideTaskbarWithIcons = ChkHideTaskbar.IsChecked == true;
         _config.RestoreIconsOnExit = ChkRestoreIcons.IsChecked == true;
         _config.ShowHiddenFiles = ChkHidden.IsChecked == true;
@@ -246,6 +240,48 @@ public partial class SettingsWindow : Window
     private void OpenConfig_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("openconfig");
 
     private void OpenLog_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("openlog");
+
+    private void CheckUpdates_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("checkupdates");
+    private void InstallUpdate_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("installupdate");
+    private void CancelUpdate_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("cancelupdate");
+    private void Releases_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("releases");
+
+    public void ScrollToUpdates()
+    {
+        NavUpdates.IsChecked = true;
+        SelectSection("updates");
+    }
+
+    private void Nav_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!_loading && sender is RadioButton { Tag: string section }) SelectSection(section);
+    }
+
+    private void SelectSection(string section)
+    {
+        _section = section;
+        foreach (FrameworkElement page in Pages.Children)
+            page.Visibility = Equals(page.Tag, section) ? Visibility.Visible : Visibility.Collapsed;
+        (PageTitle.Text, PageSubtitle.Text) = section switch
+        {
+            "appearance" => ("外观", "调整盒子背景、玻璃效果与主题。"),
+            "layout" => ("盒子排布", "让桌面上的盒子对齐、有序，保持恰好的间距。"),
+            "organize" => ("整理", "按类型归类桌面文件，也可以随时撤销上次整理。"),
+            "general" => ("常规", "管理启动方式与本地数据。"),
+            "updates" => ("版本更新", "获取最新功能与改进，保留熟悉的桌面布局。"),
+            _ => ("图标", "调整盒内图标大小与桌面图标的显示方式。"),
+        };
+        Scroller.ScrollToTop();
+    }
+
+    public void SetUpdateState(UpdateService updates)
+    {
+        LblUpdateStatus.Text = updates.Status;
+        BtnCheckUpdates.IsEnabled = !updates.IsBusy;
+        BtnInstallUpdate.IsEnabled = !updates.IsBusy;
+        BtnInstallUpdate.Visibility = updates.AvailableRelease is null ? Visibility.Collapsed : Visibility.Visible;
+        BtnCancelUpdate.Visibility = updates.IsBusy ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     public static void OpenPath(string path)
     {
