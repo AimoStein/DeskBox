@@ -14,10 +14,10 @@ public sealed class BoxItem : INotifyPropertyChanged
     private bool _insertMark;
     private string? _iconKey;
 
-    public BoxItem(string path, int iconSize, BitmapSource? initialIcon = null)
+    public BoxItem(string path, int iconSize, BitmapSource? initialIcon = null, string? displayName = null)
     {
         Path = path;
-        Name = DisplayName(path);
+        Name = Services.VirtualGroups.IsShell(path) && !string.IsNullOrWhiteSpace(displayName) ? displayName : DisplayName(path);
 
         IsDirectory = Directory.Exists(path);
         RefreshFileState(iconSize);
@@ -90,7 +90,8 @@ public sealed class BoxItem : INotifyPropertyChanged
         return true;
     }
 
-    public string Meta => IsDirectory ? "文件夹" : BuildMeta();
+    public string Meta => Services.VirtualGroups.IsShell(Path) ? "系统项目" :
+        !Services.FsUtil.PathExists(Path) ? "原项目暂不可用" : IsDirectory ? "文件夹" : BuildMeta();
 
     public BitmapSource? Icon
     {

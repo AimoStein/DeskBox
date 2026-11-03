@@ -1,95 +1,92 @@
-# 验证「登录时自启 + 盒子首帧」时间线：重启/注销重新登录后运行。
-# 用法：pwsh -File tools/verify-boot-timing.ps1
-# 输出：登录/桌面切换时间、DeskBox 与 Explorer 启动先后、盒子首帧时刻、登录任务状态。
-$ErrorActionPreference = 'Continue'
+# 重启/注销重新登录后运行；只读取现场，不启动或重启 DeskBox。
+# 可用 -LogPath 指定日志。旧日志时间戳只有秒精度，不能反推精确绝对首帧时间。
+param([string]$LogPath)
+$ErrorActionPreference = 'Stop'
 
-function Format-Time([datetime]$t) { if ($t -eq [datetime]::MinValue) { '(未知)' } else { $t.ToString('HH:mm:ss.fff') } }
+function Format-Time([datetime]$time) { $time.ToString('yyyy-MM-dd HH:mm:ss.fff') }
 
-Write-Host '===== 1. 相关进程 ====='
-Get-Process explorer, DeskBox -ErrorAction SilentlyContinue |
-    Select-Object ProcessName, Id, @{ n = 'StartTime'; e = { Format-Time $_.StartTime } }, Path |
-    Format-Table -AutoSize
+$sessionId = (Get-Process -Id $PID).SessionId
+$processes = @(Get-Process explorer, DeskBox -ErrorAction SilentlyContinue | Where-Object SessionId -eq $sessionId)
+Write-Output '===== 1. 当前会话进程（绝对时间来自系统） ====='
+$processes | Select-Object ProcessName, Id, @{ n = 'StartTime'; e = { Format-Time $_.StartTime } }, Path | Format-Table -AutoSize
 
-Write-Host '===== 2. 登录时任务状态 ====='
-schtasks /query /tn DeskBox /v /fo LIST 2>&1 |
-    Select-String -Pattern 'TaskName|Status|Last Run Time|Last Result|Task To Run|Logon Mode|状态|上次运行时间|上次结果|要运行的任务|登录模式' |
-    ForEach-Object { '  ' + $_.Line.Trim() }
+Write-Output '===== 2. 登录自启现场 ====='
+& (Join-Path $PSScriptRoot 'diagnose-autostart.ps1')
 
-Write-Host '===== 3. 旧式 Run 键（应为空） ====='
-$run = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).DeskBox
-if ($null -eq $run) { Write-Host '  (无 DeskBox Run 值，符合预期)' } else { Write-Host "  $run" }
-
-Write-Host '===== 4. 本次登录的 Shell-Core 事件（桌面切换 / Run 枚举） ====='
-$desktopSwitch = [datetime]::MinValue
-try {
-    $events = Get-WinEvent -LogName 'Microsoft-Windows-Shell-Core/Operational' -MaxEvents 600 -ErrorAction Stop |
-        Where-Object { $_.TimeCreated -gt (Get-Date).AddHours(-6) } |
-        Where-Object { $_.Id -in 9705, 9707 -or $_.Message -match 'DesktopSwitch' }
-    foreach ($ev in ($events | Sort-Object TimeCreated | Select-Object -First 40)) {
-        $msg = ($ev.Message -replace "`r?`n", ' ')
-        if ($msg.Length -gt 110) { $msg = $msg.Substring(0, 110) }
-        Write-Output ('  {0} [{1}] {2}' -f (Format-Time $ev.TimeCreated), $ev.Id, $msg)
-        if ($desktopSwitch -eq [datetime]::MinValue -and $ev.Id -ne 9705 -and $ev.Id -ne 9707) {
-            $desktopSwitch = $ev.TimeCreated
-        }
-        if ($desktopSwitch -eq [datetime]::MinValue -and $ev.Id -eq 9705 -and $msg -match 'Run') {
-            $desktopSwitch = $ev.TimeCreated
-        }
-    }
-} catch {
-    Write-Host ('  读取失败: ' + $_.Exception.Message)
+if (-not $LogPath) {
+    $candidates = @(
+        $processes | Where-Object ProcessName -eq 'DeskBox' | ForEach-Object { Join-Path (Split-Path $_.Path -Parent) 'deskbox.log' }
+        Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\deskbox.log'
+        Join-Path $env:APPDATA 'DeskBox\deskbox.log'
+    )
+    $LogPath = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
+Write-Output '===== 3. 最近一次有盒子首帧的启动 ====='
+if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath)) {
+    throw '找不到 deskbox.log，请用 -LogPath 指定实际配置目录中的日志。'
+}
+Write-Output "日志: $LogPath"
+$lines = @(Get-Content -LiteralPath $LogPath -Encoding UTF8)
+# 不用最新模块入口直接定界：后续的单实例转发/自检进程也会留下入口日志。
+$frameIndex = -1
+for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+    if ($lines[$i] -match '盒子「.+?」首帧（ContentRendered）') { $frameIndex = $i; break }
+}
+$start = -1
+for ($i = $frameIndex; $i -ge 0; $i--) {
+    if ($lines[$i] -match '\[启动\] 模块初始化') { $start = $i; break }
+}
+if ($start -lt 0) { throw '日志中没有包含盒子首帧的完整启动段。' }
+$end = $lines.Count
+for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '\[启动\] 模块初始化') { $end = $i; break }
+    if ($lines[$i] -match '\[启动\] 启动观测结束') { $end = $i + 1; break }
+}
+$block = @($lines[$start..($end - 1)])
+$block | Where-Object { $_ -match '\[启动\]|\[图标\]|图标批次|注册登录任务失败|开机自启：' } | Write-Output
 
-Write-Host '===== 5. deskbox.log 最近一次启动时间线 ====='
-$logPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\deskbox.log'
-if (-not (Test-Path $logPath)) { $logPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'deskbox.log' }
-
-if (-not (Test-Path $logPath)) {
-    Write-Host "  找不到日志：$logPath"
-} else {
-    $lines = Get-Content $logPath
-    $start = -1
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        if ($lines[$i] -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*\[启动\] 模块初始化') { $start = $i; break }
+$frames = @($block | ForEach-Object {
+    if ($_ -match '盒子「(.+?)」首帧（ContentRendered）自进程启动 (\d+)ms') {
+        [pscustomobject]@{ Title = $matches[1]; Milliseconds = [long]$matches[2] }
     }
-
-    if ($start -lt 0) {
-        Write-Host '  日志里没有 [启动] 段。'
-    } else {
-        $block = $lines[$start..([Math]::Min($start + 40, $lines.Count - 1))]
-
-        foreach ($line in $block) {
-            if ($line -match '\[启动\] (模块初始化|进程入口|开机上下文|盒子显示|启动完成|桌面现场)|盒子「.+?」首帧') {
-                Write-Host ('  ' + $line)
-            }
-        }
-
-        $firstLine = $block | Where-Object { $_ -match '\[启动\] 模块初始化' } | Select-Object -First 1
-        $frameLine = $block | Where-Object { $_ -match '首帧（ContentRendered）' } | Select-Object -First 1
-        if ($firstLine -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*自进程启动 (\d+)ms') {
-            $logStamp = [datetime]::ParseExact($matches[1], 'yyyy-MM-dd HH:mm:ss', $null)
-            $sinceProcess = [int]$matches[2]
-            $deskBoxStart = $logStamp.AddMilliseconds(-$sinceProcess)
-
-            Write-Host ''
-            Write-Host '===== 6. 关键结论 ====='
-            if ($desktopSwitch -ne [datetime]::MinValue) {
-                Write-Host ('  桌面切换:            {0}' -f (Format-Time $desktopSwitch))
-            }
-            Write-Host ('  DeskBox 进程启动:    {0}（由日志反推）' -f (Format-Time $deskBoxStart))
-
-            $ex = Get-Process explorer -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($ex) {
-                Write-Host ('  Explorer 启动:       {0}' -f (Format-Time $ex.StartTime))
-                Write-Host ('  DeskBox 比 Explorer: {0} ms（负值=更早）' -f [int]($deskBoxStart - $ex.StartTime).TotalMilliseconds)
-            }
-
-            if ($frameLine -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
-                $frameStamp = [datetime]::ParseExact($matches[1], 'yyyy-MM-dd HH:mm:ss', $null)
-                if ($desktopSwitch -ne [datetime]::MinValue) {
-                    Write-Host ('  盒子首帧比桌面切换:  {0} ms' -f [int]($frameStamp - $desktopSwitch).TotalMilliseconds)
-                }
-            }
-        }
+})
+$expected = $null
+foreach ($line in $block) {
+    if ($line -match '配置读取（盒子 (\d+) 个）') { $expected = [int]$matches[1]; break }
+}
+Write-Output '===== 4. 本进程显示耗时（不能单独视为登录或冷启动耗时） ====='
+if ($frames.Count -gt 0) {
+    $range = $frames | Measure-Object Milliseconds -Minimum -Maximum
+    Write-Output "首个盒子首帧: $($range.Minimum)ms；最后一个已记录盒子首帧: $($range.Maximum)ms"
+    if ($null -ne $expected) {
+        Write-Output "首帧记录: $($frames.Count)/$expected"
+        if ($frames.Count -ne $expected) { Write-Output '首帧记录不完整，不能据此认定全部盒子显示完成。' }
     }
+}
+Write-Output 'ContentRendered 表示盒子首帧；完整图标需同时核对图标批次/预热日志。'
+Write-Output '日志时间戳按秒截断；本脚本不据此反推毫秒精度的进程或首帧绝对时间。'
+
+Write-Output '===== 5. 当前 Explorer 启动后的 Shell-Core 事件 ====='
+$explorer = $processes | Where-Object ProcessName -eq 'explorer' | Sort-Object StartTime | Select-Object -First 1
+if (-not $explorer) { Write-Output '当前会话没有 Explorer，无法限定事件范围。'; return }
+try {
+    # 避免取“最近六小时第一条”误用其他会话；最多读取 10000 条，并明确截断。
+    $events = @(Get-WinEvent -FilterHashtable @{
+        LogName = 'Microsoft-Windows-Shell-Core/Operational'; StartTime = $explorer.StartTime
+    } -MaxEvents 10000 -ErrorAction Stop)
+    if ($events.Count -eq 10000) { Write-Output '事件达到读取上限，早期记录可能缺失。' }
+    $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $relevant = @($events | Where-Object {
+        $_.UserId -and $_.UserId.Value -eq $userSid -and
+        ($_.Id -in 9705, 9707, 9708 -or $_.Message -match 'DesktopSwitch')
+    } | Sort-Object TimeCreated)
+    $relevant | ForEach-Object {
+        $message = $_.Message -replace '\r?\n', ' '
+        Write-Output ('{0} [{1}] {2}' -f (Format-Time $_.TimeCreated), $_.Id, $message)
+    }
+    if ($relevant.Count -eq 0) { Write-Output '没有匹配的桌面切换/Run 事件，登录到首帧耗时未知。' }
+    Write-Output '9705 是 Run/RunOnce 枚举，不代表桌面切换；Explorer 启动也不等同于登录。'
+    Write-Output '需要把同次登录的 DeskBox 创建事件与对应首帧日志对齐后，再判断登录等待时间。'
+} catch {
+    Write-Output ('事件读取失败，登录到首帧耗时未知: ' + $_.Exception.Message)
 }

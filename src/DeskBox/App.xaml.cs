@@ -150,6 +150,7 @@ public partial class App : Application
 
         _config = ConfigStore.Load();
         if (DesktopFolderRecovery.Recover(_config)) ConfigStore.Save(_config);
+        if (VirtualGroups.Migrate(_config)) ConfigStore.Save(_config);
         _lastShowHiddenFiles = _config.ShowHiddenFiles;
         LogStartupStage($"配置读取（盒子 {_config.Boxes.Count} 个）");
 
@@ -163,7 +164,7 @@ public partial class App : Application
         _shell = new DesktopShell();
         try
         {
-            Directory.CreateDirectory(_config.EffectiveBoxRoot);
+            if (_config.Boxes.Any(box => !box.IsVirtual)) Directory.CreateDirectory(_config.EffectiveBoxRoot);
         }
         catch (Exception ex)
         {
@@ -188,7 +189,11 @@ public partial class App : Application
         };
         _folderRecoveryTimer.Tick += (_, _) =>
         {
-            if (_exiting || !DesktopFolderRecovery.Recover(_config)) return;
+            if (_exiting) return;
+            foreach (var box in _boxes) box.RecheckReferenceLocations();
+            var recovered = DesktopFolderRecovery.Recover(_config);
+            var migrated = VirtualGroups.Migrate(_config);
+            if (!recovered && !migrated) return;
             foreach (var box in _boxes) box.RefreshFromConfig(reloadItems: true);
             ConfigStore.Save(_config);
         };
@@ -493,6 +498,11 @@ public partial class App : Application
 
                 foreach (var box in boxes)
                 {
+                    if (box.IsVirtual)
+                    {
+                        paths.AddRange(VirtualGroups.Paths(box, includeHidden));
+                        continue;
+                    }
                     var folder = string.IsNullOrWhiteSpace(box.Folder)
                         ? Path.Combine(root, FsUtil.Sanitize(box.Title))
                         : box.Folder;
@@ -1109,7 +1119,7 @@ public partial class App : Application
         // 不会出现"第一个盒子先出来、后面几个再一个个补"的延迟。
         foreach (var boxConfig in _config.Boxes.ToList())
         {
-            if (string.IsNullOrWhiteSpace(boxConfig.Folder) || !Directory.Exists(boxConfig.Folder))
+            if (!boxConfig.IsVirtual && (string.IsNullOrWhiteSpace(boxConfig.Folder) || !Directory.Exists(boxConfig.Folder)))
             {
                 Log.Warn($"盒子目录暂不可用，保留盒子记录：{boxConfig.Title}");
                 continue;
@@ -1140,6 +1150,11 @@ public partial class App : Application
         };
 
         window.Changed += (_, _) => ScheduleSave();
+        window.MembershipChanged += (_, _) =>
+        {
+            foreach (var box in _boxes) box.RefreshFromConfig(reloadItems: true);
+            ScheduleSave();
+        };
         window.RemovalRequested += (sender, _) => RemoveBox((BoxWindow)sender!);
         window.Closed += OnBoxWindowClosed;
 
@@ -1282,7 +1297,7 @@ public partial class App : Application
         var pending = new List<BoxWindow>(missing.Count);
         foreach (var config in missing)
         {
-            if (string.IsNullOrWhiteSpace(config.Folder) || !Directory.Exists(config.Folder))
+            if (!config.IsVirtual && (string.IsNullOrWhiteSpace(config.Folder) || !Directory.Exists(config.Folder)))
             {
                 Log.Warn($"盒子目录不存在，跳过重建：「{config.Title}」");
                 continue;
@@ -1321,21 +1336,10 @@ public partial class App : Application
             title = $"新盒子 {index++}";
         }
 
-        var folder = FsUtil.UniqueFolder(_config.EffectiveBoxRoot, FsUtil.Sanitize(title));
-        try
-        {
-            Directory.CreateDirectory(folder);
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("创建盒子目录失败: " + ex.Message);
-            return;
-        }
-
         var boxConfig = new BoxConfig
         {
             Title = title,
-            Folder = folder,
+            IsVirtual = true,
             Width = 330,
             Height = 260,
             ExpandedHeight = 260,
@@ -1382,42 +1386,17 @@ public partial class App : Application
         boxConfig.Y = y;
     }
 
-    private void EnsureBox(string title, string folder)
+    private void EnsureBox(string title)
     {
-        var existing = _boxes.FirstOrDefault(b =>
-            string.Equals(b.Config.Title, title, StringComparison.OrdinalIgnoreCase));
-
+        var boxConfig = _config.Boxes.FirstOrDefault(box => box.IsVirtual && box.Title == title);
+        if (boxConfig is null) return;
+        var existing = _boxes.FirstOrDefault(box => box.Config.Id == boxConfig.Id);
         if (existing is not null)
         {
-            if (!existing.IsVisible)
-            {
-                existing.SetVisible(true);
-            }
-
+            if (!existing.IsVisible) existing.SetVisible(true);
             return;
         }
-
-        try
-        {
-            Directory.CreateDirectory(folder);
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("创建盒子目录失败: " + ex.Message);
-            return;
-        }
-
-        var boxConfig = new BoxConfig
-        {
-            Title = title,
-            Folder = folder,
-            Width = 330,
-            Height = 260,
-            ExpandedHeight = 260,
-        };
-
         PlaceNewBox(boxConfig);
-        _config.Boxes.Add(boxConfig);
         CreateBoxWindow(boxConfig);
     }
 
@@ -1478,7 +1457,7 @@ public partial class App : Application
                 break;
 
             case "openroot":
-                FsUtil.OpenFolder(_config.EffectiveBoxRoot);
+                FsUtil.OpenFolder(ConfigStore.Directory);
                 break;
 
             case "openconfig":
@@ -1618,7 +1597,10 @@ public partial class App : Application
     private void RunOrganize()
     {
         var root = _config.EffectiveBoxRoot;
-        var items = _shell.EnumerateItems(root, _config.ShowHiddenFiles);
+        var assigned = _config.Boxes.Where(box => box.IsVirtual).SelectMany(box => box.Entries)
+            .Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var items = _shell.EnumerateItems(root, _config.ShowHiddenFiles)
+            .Where(path => !assigned.Contains(VirtualGroups.Key(path))).ToList();
         var plan = Organizer.BuildPlan(items, _config.OrganizeShortcuts, out var skipped);
 
         if (plan.Count == 0)
@@ -1635,10 +1617,10 @@ public partial class App : Application
             .Select(g => $"· {g.Key}：{g.Count()} 项");
 
         var message =
-            $"将把桌面上的 {plan.Count} 项整理到：\n{root}\n\n" +
+            $"将把桌面上的 {plan.Count} 项归入以下分组：\n\n" +
             string.Join("\n", groups) +
             (skipped.Count > 0 ? $"\n\n（{skipped.Count} 个快捷方式 / 程序保持不变）" : string.Empty) +
-            "\n\n文件会被移动进对应文件夹，随时可以用「撤销上次整理」还原。";
+            "\n\n原文件和快捷方式留在原位置，只记录分组。随时可以撤销。";
 
         if (System.Windows.MessageBox.Show(message, "DeskBox · 一键整理", MessageBoxButton.OKCancel, MessageBoxImage.Question)
             != MessageBoxResult.OK)
@@ -1647,11 +1629,11 @@ public partial class App : Application
             return;
         }
 
-        var result = Organizer.Execute(plan, root);
+        var result = VirtualGroups.Organize(_config, plan);
 
         foreach (var category in result.Categories)
         {
-            EnsureBox(category, Path.Combine(root, category));
+            EnsureBox(category);
         }
 
         _config.LastOrganize = result.Moves;
@@ -1666,7 +1648,7 @@ public partial class App : Application
         var text = $"已整理 {result.Moves.Count} 项，分成 {result.Categories.Count} 个盒子。";
         if (result.Failed.Count > 0)
         {
-            text += $" 有 {result.Failed.Count} 项因为被占用没有移动。";
+            text += $" 有 {result.Failed.Count} 项未能归组。";
         }
 
         _settings?.RefreshState();
@@ -1684,7 +1666,9 @@ public partial class App : Application
 
         var count = _config.LastOrganize.Count;
         if (System.Windows.MessageBox.Show(
-                $"把上次整理的 {count} 项移回原来的位置？",
+                _config.LastOrganize.All(record => !string.IsNullOrEmpty(record.GroupId))
+                    ? $"撤销上次的 {count} 项分组？原文件保持不变。"
+                    : $"撤销上次整理的 {count} 项？旧版移动的文件会移回原位置。",
                 "DeskBox · 撤销整理",
                 MessageBoxButton.OKCancel,
                 MessageBoxImage.Question) != MessageBoxResult.OK)
@@ -1692,9 +1676,8 @@ public partial class App : Application
             return;
         }
 
-        var restored = Organizer.Undo(_config.LastOrganize);
-        _config.LastOrganize.Clear();
-        _config.LastOrganizeTime = string.Empty;
+        var restored = VirtualGroups.Undo(_config, _config.LastOrganize);
+        if (_config.LastOrganize.Count == 0) _config.LastOrganizeTime = string.Empty;
         ConfigStore.Save(_config);
 
         foreach (var box in _boxes.ToList())
@@ -1703,7 +1686,8 @@ public partial class App : Application
         }
 
         _settings?.RefreshState();
-        _settings?.SetOrganizeStatus($"已把上次整理的 {restored} 项还原回桌面。");
+        _settings?.SetOrganizeStatus($"已撤销 {restored} 项整理。" +
+            (_config.LastOrganize.Count > 0 ? $" 还有 {_config.LastOrganize.Count} 项可重试。" : ""));
         _tray?.ShowInfo("DeskBox", $"已还原 {restored} 项。");
     }
 
@@ -1820,7 +1804,7 @@ public partial class App : Application
             $"DeskBox v{version}\n\n" +
             "离线桌面整理工具：分区盒子、一键整理、双击隐藏图标、桌面右键菜单。\n\n" +
             "· 仅检查和下载更新时联网，无账号、无同步、无遥测\n" +
-            "· 盒子对应磁盘上的真实文件夹，拆除盒子不会删除文件\n" +
+            "· 虚拟分组保留原文件位置，解散分组不会删除文件\n" +
             "· 配置位置：exe 旁边的 config.json（不可写时回退到 %AppData%\\DeskBox\\）",
             "关于 DeskBox",
             MessageBoxButton.OK,
@@ -1886,7 +1870,7 @@ public partial class App : Application
 
         _tray.ItemToggleIcons.Text = _shell.IconsVisible ? "隐藏桌面图标" : "显示桌面图标";
         _tray.ItemUndo.Enabled = _config.LastOrganize.Count > 0;
-        _tray.ItemBoxRoot.Text = $"打开盒子文件夹（{_boxes.Count} 个盒子）";
+        _tray.ItemBoxRoot.Text = $"打开分组配置文件夹（{_boxes.Count} 个分组）";
     }
 
     private void ApplyConfig()
@@ -1906,6 +1890,7 @@ public partial class App : Application
         foreach (var box in _boxes)
         {
             box.RefreshFromConfig(hiddenFilesChanged);
+            if (_config.IconsHiddenByApp) box.SetVisible(!_config.HideBoxesWithIcons);
         }
     }
 

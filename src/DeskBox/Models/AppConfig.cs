@@ -20,6 +20,10 @@ public sealed class BoxConfig
     /// <summary>盒子对应的真实文件夹。为空时按 BoxRoot\Title 推导。</summary>
     public string Folder { get; set; } = "";
 
+    /// <summary>虚拟分组只记录原路径；Folder 仅保留为旧版内容的位置。</summary>
+    public bool IsVirtual { get; set; }
+    public List<GroupEntry> Entries { get; set; } = new();
+
     public double X { get; set; } = 120;
     public double Y { get; set; } = 120;
     public double Width { get; set; } = 330;
@@ -31,7 +35,7 @@ public sealed class BoxConfig
     public bool Visible { get; set; } = true;
 
     /// <summary>
-    /// 用户拖动条目排出来的显示顺序（只存文件名）。
+    /// 用户拖动条目排出来的显示顺序（虚拟组存完整路径，旧文件夹盒子存文件名）。
     /// 新放进来的条目不在列表里，按默认规则排在后面。
     /// </summary>
     public List<string> ItemOrder { get; set; } = new();
@@ -44,11 +48,20 @@ public sealed class MoveRecord
 {
     public string From { get; set; } = "";
     public string To { get; set; } = "";
+    /// <summary>非空表示仅增加分组关系，撤销时不移动文件。</summary>
+    public string GroupId { get; set; } = "";
+}
+
+public sealed class GroupEntry
+{
+    public string Path { get; set; } = "";
+    /// <summary>仅 Shell 命名空间项需要保存显示名，文件名始终跟随原文件。</summary>
+    public string DisplayName { get; set; } = "";
 }
 
 public sealed class AppConfig
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
 
     /// <summary>盒子内容存放的根目录，默认「桌面\桌面整理」。</summary>
     public string BoxRoot { get; set; } = "";
@@ -253,6 +266,8 @@ public static class ConfigStore
 
         foreach (var box in cfg.Boxes)
         {
+            box.Entries ??= new();
+            box.ItemOrder ??= new();
             if (box.Width < 180) box.Width = 180;
             if (box.Height < 120) box.Height = 120;
             if (string.IsNullOrWhiteSpace(box.Title)) box.Title = "新盒子";

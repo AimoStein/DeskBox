@@ -27,7 +27,7 @@
         <DataTemplate x:Key="IconItemTemplate">
             <Grid>
                 <Border x:Name="Host" Width="{Binding ItemWidth}" Height="{Binding ItemHeight}"
-                        Background="Transparent" CornerRadius="7" Margin="1" Padding="4,6">
+                        Background="Transparent" CornerRadius="7" Margin="1" Padding="4,6" ToolTip="{Binding Path}">
                     <Border.Style>
                         <Style TargetType="Border">
                             <Style.Triggers>
@@ -61,7 +61,7 @@
 
         <DataTemplate x:Key="ListItemTemplate">
             <Grid>
-                <Border x:Name="Host" Background="Transparent" CornerRadius="6" Margin="0,1" Padding="6,5">
+                <Border x:Name="Host" Background="Transparent" CornerRadius="6" Margin="0,1" Padding="6,5" ToolTip="{Binding Path}">
                     <Border.Style>
                         <Style TargetType="Border">
                             <Style.Triggers>

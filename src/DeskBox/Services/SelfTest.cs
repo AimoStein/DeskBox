@@ -1279,6 +1279,7 @@ public static class SelfTest
         }
 
         UpdateSelfTest.Run(Check);
+        VirtualGroupSelfTest.Run(Check, sandbox);
         report.AppendLine();
         report.AppendLine(failures == 0 ? "自检结果：全部通过" : $"自检结果：{failures} 项失败");
 

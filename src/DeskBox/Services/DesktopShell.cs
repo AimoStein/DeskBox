@@ -12,10 +12,11 @@ public sealed class DesktopShell
     private readonly Lazy<string> _desktopPath;
     private readonly Lazy<string> _publicDesktopPath;
 
-    public DesktopShell(string? desktopPath = null)
+    public DesktopShell(string? desktopPath = null, string? publicDesktopPath = null)
     {
         _desktopPath = new Lazy<string>(() => desktopPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
-        _publicDesktopPath = new Lazy<string>(() => Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
+        _publicDesktopPath = new Lazy<string>(() => publicDesktopPath ?? (desktopPath is null
+            ? Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) : ""));
     }
 
     public string DesktopPath => _desktopPath.Value;
@@ -72,7 +73,9 @@ public sealed class DesktopShell
         var result = new List<string>();
         var excluded = Normalize(excludeFolder);
 
-        foreach (var path in EnumerateSafe(DesktopPath))
+        var desktopItems = EnumerateSafe(DesktopPath);
+        if (!string.IsNullOrEmpty(PublicDesktopPath)) desktopItems = desktopItems.Concat(EnumerateSafe(PublicDesktopPath));
+        foreach (var path in desktopItems.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (excluded.Length > 0 && string.Equals(Normalize(path), excluded, StringComparison.OrdinalIgnoreCase))
             {
@@ -111,7 +114,7 @@ public sealed class DesktopShell
     {
         try
         {
-            return Directory.EnumerateFileSystemEntries(directory);
+            return Directory.GetFileSystemEntries(directory);
         }
         catch (Exception ex)
         {

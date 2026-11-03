@@ -390,7 +390,7 @@ internal static class IconLoader
 
         try
         {
-            if (!FsUtil.PathExists(path))
+            if (!ShellItemInterop.LooksLikeParsingName(path) && !FsUtil.PathExists(path))
             {
                 return null;
             }

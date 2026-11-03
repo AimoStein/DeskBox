@@ -425,7 +425,7 @@
                                                 <CheckBox x:Name="ChkHidden" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="显示隐藏文件" />
                                             </Grid>
                                             <TextBlock Text="在盒子中显示带隐藏属性的条目。" Style="{StaticResource Caption}" Margin="0,0,0,20" />
-                                            <Button Content="打开盒子文件夹" Style="{StaticResource GhostButton}" Click="OpenRoot_Click" />
+                                            <Button Content="打开分组配置文件夹" Style="{StaticResource GhostButton}" Click="OpenRoot_Click" />
                                             <TextBlock Text="图标大小同时应用于图标与列表视图。" Style="{StaticResource Caption}" Margin="0,18,0,0" />
                                         </StackPanel>
                                     </Border>
@@ -445,6 +445,14 @@
                                                     <ColumnDefinition Width="*" />
                                                     <ColumnDefinition Width="Auto" />
                                                 </Grid.ColumnDefinitions>
+                                                <TextBlock Text="同时隐藏分组" Style="{StaticResource RowLabel}" />
+                                                <CheckBox x:Name="ChkHideGroups" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="同时隐藏分组" />
+                                            </Grid>
+                                            <Grid Margin="0,0,0,16">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
                                                 <TextBlock Text="同时隐藏任务栏" Style="{StaticResource RowLabel}" />
                                                 <CheckBox x:Name="ChkHideTaskbar" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="同时隐藏任务栏" />
                                             </Grid>
@@ -456,7 +464,7 @@
                                                 <TextBlock Text="退出时恢复桌面图标" Style="{StaticResource RowLabel}" />
                                                 <CheckBox x:Name="ChkRestoreIcons" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="退出时恢复桌面图标" />
                                             </Grid>
-                                            <TextBlock Text="再次双击恢复显示。任务栏联动适用于所有屏幕。" Style="{StaticResource Caption}" />
+                                            <TextBlock Text="关闭“同时隐藏分组”，可隐藏桌面原图标并继续使用分组。" Style="{StaticResource Caption}" />
                                         </StackPanel>
                                     </Border>
                                 </Grid>
@@ -509,9 +517,9 @@
                                 </Grid.ColumnDefinitions>
                                 <Border Style="{StaticResource Card}">
                                     <StackPanel>
-                                        <TextBlock Text="桌面文件" Style="{StaticResource CardTitle}" />
-                                        <TextBlock Text="按文件类型归入对应盒子，让桌面保持整洁。" Style="{StaticResource Caption}" Margin="0,0,0,18" />
-                                        <Button x:Name="BtnOrganize" Content="整理桌面文件到盒子" Style="{StaticResource PrimaryButton}" Click="Organize_Click" Margin="0,0,0,10" />
+                                        <TextBlock Text="虚拟分组" Style="{StaticResource CardTitle}" />
+                                        <TextBlock Text="按类型把桌面项目归入分组，文件和快捷方式始终留在原位置。" Style="{StaticResource Caption}" Margin="0,0,0,18" />
+                                        <Button x:Name="BtnOrganize" Content="按类型分组桌面项目" Style="{StaticResource PrimaryButton}" Click="Organize_Click" Margin="0,0,0,10" />
                                         <Button x:Name="BtnUndo" Content="撤销上次整理" Style="{StaticResource GhostButton}" Click="Undo_Click" />
                                         <TextBlock x:Name="LblLastOrganize" Style="{StaticResource Caption}" Margin="0,18,0,0" />
                                         <TextBlock x:Name="LblOrganizeStatus" Style="{StaticResource Caption}" Margin="0,12,0,0" Visibility="Collapsed" />
@@ -528,7 +536,7 @@
                                             <TextBlock Text="包含快捷方式和程序" Style="{StaticResource RowLabel}" />
                                             <CheckBox x:Name="ChkShortcuts" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="整理时包含快捷方式和程序" />
                                         </Grid>
-                                        <TextBlock Text="默认保留桌面上的快捷方式和可执行程序。" Style="{StaticResource Caption}" Margin="0,0,0,20" />
+                                        <TextBlock Text="默认不自动归组快捷方式和程序；手动拖入始终可用，原文件保持不变。" Style="{StaticResource Caption}" Margin="0,0,0,20" />
                                         <TextBlock Text="自动分类" Style="{StaticResource RowLabel}" Margin="0,0,0,8" />
                                         <TextBlock Text="文档 / 图片 / 视频 / 音乐 / 压缩包 / 文件夹 / 其他" Style="{StaticResource Caption}" />
                                     </StackPanel>

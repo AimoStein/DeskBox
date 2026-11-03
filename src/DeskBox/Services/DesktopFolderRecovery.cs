@@ -32,6 +32,7 @@ public static class DesktopFolderRecovery
                 // 旧目录仍有内容时保留原绑定，避免选中另一套同名文件。
                 if (Directory.Exists(box.Folder) && Directory.EnumerateFileSystemEntries(box.Folder).Any()) continue;
                 Log.Info($"桌面目录迁移，恢复盒子「{box.Title}」：{box.Folder} → {target}");
+                VirtualGroups.RenameReference(config, box.Folder, target);
                 box.Folder = target;
                 changed = true;
             }

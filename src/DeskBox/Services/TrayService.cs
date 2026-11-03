@@ -22,10 +22,10 @@ public sealed class TrayService : IDisposable
         ItemArrange = Add("整理盒子（排列整齐）", "arrange");
         ItemNewBox = Add("新建盒子", "newbox");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
-        ItemOrganize = Add("整理桌面文件到盒子", "organize");
+        ItemOrganize = Add("按类型分组桌面项目", "organize");
         ItemUndo = Add("撤销上次整理", "undo");
         ItemToggleIcons = Add("显示 / 隐藏桌面图标", "toggleicons");
-        ItemBoxRoot = Add("打开盒子文件夹", "openroot");
+        ItemBoxRoot = Add("打开分组配置文件夹", "openroot");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
         Add("设置", "settings");
         Add("检查更新", "checkupdates");

@@ -28,6 +28,7 @@ public partial class BoxWindow : Window
 
     /// <summary>盒内拖动时捎带的来源标记，用来区分「盒内排序」和「跨盒子移动」。</summary>
     internal const string BoxDragFormat = "DeskBox.BoxItems";
+    internal const string VirtualDragFormat = "DeskBox.VirtualGroupId";
 
     private readonly AppConfig _config;
     private readonly BoxConfig _box;
@@ -36,6 +37,7 @@ public partial class BoxWindow : Window
     private readonly ObservableCollection<BoxItem> _items = new();
 
     private FileSystemWatcher? _watcher;
+    private readonly List<FileSystemWatcher> _referenceWatchers = new();
     private DispatcherTimer? _zOrderTimer;
     private DispatcherTimer? _persistTimer;
     private DispatcherTimer? _reloadTimer;
@@ -99,7 +101,8 @@ public partial class BoxWindow : Window
         ApplyCollapseState();
         var visualMs = startupWatch?.ElapsedMilliseconds ?? 0;
 
-        AttachWatcher();
+        if (box.IsVirtual) Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(AttachWatcher));
+        else AttachWatcher();
         ReloadItems();
         var contentMs = startupWatch?.ElapsedMilliseconds ?? 0;
 
@@ -133,6 +136,7 @@ public partial class BoxWindow : Window
 
     /// <summary>需要保存配置。</summary>
     public event EventHandler? Changed;
+    public event EventHandler? MembershipChanged;
 
     /// <summary>用户要求删除这个盒子。</summary>
     public event EventHandler? RemovalRequested;
@@ -163,6 +167,7 @@ public partial class BoxWindow : Window
     {
         get
         {
+            if (_box.IsVirtual) return _box.Folder;
             if (!string.IsNullOrWhiteSpace(_box.Folder))
             {
                 return _box.Folder;
@@ -717,6 +722,8 @@ public partial class BoxWindow : Window
         _reloadTimer?.Stop();
         _watcher?.Dispose();
         _watcher = null;
+        foreach (var watcher in _referenceWatchers) watcher.Dispose();
+        _referenceWatchers.Clear();
 
         try
         {
@@ -732,8 +739,40 @@ public partial class BoxWindow : Window
 
     private void AttachWatcher()
     {
+        if (_exiting) return;
         _watcher?.Dispose();
         _watcher = null;
+        foreach (var watcher in _referenceWatchers) watcher.Dispose();
+        _referenceWatchers.Clear();
+
+        if (_box.IsVirtual)
+        {
+            foreach (var parent in _box.Entries.Where(entry => !VirtualGroups.IsShell(entry.Path))
+                .Select(entry => Path.GetDirectoryName(entry.Path)).Where(parent => !string.IsNullOrEmpty(parent))
+                .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (!Directory.Exists(parent)) continue;
+                    var watcher = new FileSystemWatcher(parent!)
+                    {
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
+                    };
+                    watcher.Created += OnFolderChanged;
+                    watcher.Deleted += OnFolderChanged;
+                    watcher.Renamed += OnFolderChanged;
+                    watcher.Changed += OnFolderChanged;
+                    watcher.Error += (_, _) => Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (!_exiting) { ReloadItems(); AttachWatcher(); }
+                    }));
+                    _referenceWatchers.Add(watcher);
+                    watcher.EnableRaisingEvents = true;
+                }
+                catch (Exception ex) { Log.Warn($"监视分组原位置失败 {parent}: {ex.Message}"); }
+            }
+            return;
+        }
 
         try
         {
@@ -762,9 +801,27 @@ public partial class BoxWindow : Window
     {
         Dispatcher.BeginInvoke(() =>
         {
+            if (_exiting) return;
+            if (_box.IsVirtual && e is RenamedEventArgs renamed &&
+                VirtualGroups.RenameReference(_config, renamed.OldFullPath, renamed.FullPath))
+            {
+                MembershipChanged?.Invoke(this, EventArgs.Empty);
+                Changed?.Invoke(this, EventArgs.Empty);
+            }
             _reloadTimer?.Stop();
             _reloadTimer?.Start();
         });
+    }
+
+    internal void RecheckReferenceLocations()
+    {
+        if (!_box.IsVirtual || _exiting) return;
+        var parents = _box.Entries.Where(entry => !VirtualGroups.IsShell(entry.Path))
+            .Select(entry => Path.GetDirectoryName(entry.Path)).Where(parent => !string.IsNullOrEmpty(parent) && Directory.Exists(parent))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (parents.SetEquals(_referenceWatchers.Select(watcher => watcher.Path))) return;
+        AttachWatcher();
+        ReloadItems();
     }
 
     public void ReloadItems()
@@ -776,26 +833,8 @@ public partial class BoxWindow : Window
         var paths = new List<string>();
         try
         {
-            var folder = Folder;
-            if (!Directory.Exists(folder))
-            {
-                Directory.CreateDirectory(folder);
-            }
-
-            foreach (var path in Directory.EnumerateFileSystemEntries(folder))
-            {
-                if (Path.GetFileName(path).Equals("desktop.ini", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (!_config.ShowHiddenFiles && FsUtil.IsHiddenOrSystem(path))
-                {
-                    continue;
-                }
-
-                paths.Add(path);
-            }
+            if (!_box.IsVirtual && !Directory.Exists(Folder)) Directory.CreateDirectory(Folder);
+            paths.AddRange(VirtualGroups.Paths(_box, _config.ShowHiddenFiles));
         }
         catch (Exception ex)
         {
@@ -816,7 +855,7 @@ public partial class BoxWindow : Window
         });
 
         // 用户手动拖出来的顺序优先，没记录过的（新放进来的）按上面的默认规则排在后面
-        paths = ItemOrder.Sort(paths, _box.ItemOrder, Path.GetFileName);
+        paths = ItemOrder.Sort(paths, _box.ItemOrder, OrderKey);
 
         // 复用现有条目和容器：重复的文件监视事件不能先清空整个盒子再重建。
         var existing = _items.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
@@ -840,7 +879,8 @@ public partial class BoxWindow : Window
 
             // 预热后内存里通常已有真图标：先查一下再建条目，首帧直接就是图标，不闪占位图。
             var cached = IconCache.TryGetFast(path, size);
-            var item = new BoxItem(path, size, cached) { IsSelected = selected.Contains(path) };
+            var label = _box.IsVirtual ? _box.Entries.FirstOrDefault(entry => string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase))?.DisplayName : null;
+            var item = new BoxItem(path, size, cached, label) { IsSelected = selected.Contains(path) };
             _items.Insert(index, item);
 
             if (cached is null)
@@ -902,7 +942,7 @@ public partial class BoxWindow : Window
     {
         // 除了文件，也接受资源管理器拖过来的系统项（回收站 / 控制面板 / 网络…）
         var ok = ShellDrop.CanAccept(e.Data);
-        e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
+        e.Effects = ok ? (_box.IsVirtual || e.Data.GetDataPresent(VirtualDragFormat) ? DragDropEffects.Copy : DragDropEffects.Move) : DragDropEffects.None;
         DropHighlight.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
         e.Handled = true;
     }
@@ -911,7 +951,7 @@ public partial class BoxWindow : Window
     private void Box_DragOver(object sender, DragEventArgs e)
     {
         var ok = ShellDrop.CanAccept(e.Data);
-        e.Effects = ok ? DragDropEffects.Move : DragDropEffects.None;
+        e.Effects = ok ? (_box.IsVirtual || e.Data.GetDataPresent(VirtualDragFormat) ? DragDropEffects.Copy : DragDropEffects.Move) : DragDropEffects.None;
         DropHighlight.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
         ShowInsertMark(ok ? InsertIndexFor(e.GetPosition(ItemsHost)) : -1);
         e.Handled = true;
@@ -935,8 +975,7 @@ public partial class BoxWindow : Window
         _items.Select(item => Path.GetFileName(item.Path)).ToList();
 
     /// <summary>
-    /// 落到这个盒子上：盒内拖动 = 调整顺序（不碰磁盘），跨盒子 / 从外面拖 = 搬进来并放到落点位置。
-    /// 回收站 / 控制面板 / 网络这类系统图标没有磁盘路径，会在盒子目录里落成一个指向它的 .lnk。
+    /// 虚拟组的拖放只修改引用和顺序。保留旧文件夹盒子的处理，供迁移与旧版自检兼容。
     /// </summary>
     internal void HandleDrop(IDataObject data, int insertIndex)
     {
@@ -944,6 +983,23 @@ public partial class BoxWindow : Window
         if (items.Count == 0)
         {
             Log.Warn("拖动落点：没有拿到文件或系统项，忽略。");
+            return;
+        }
+
+        if (_box.IsVirtual || data.GetDataPresent(VirtualDragFormat))
+        {
+            if (!_box.IsVirtual && !VirtualGroups.Convert(_box, _config.EffectiveBoxRoot)) return;
+            var entries = items.Select(item => new GroupEntry
+            {
+                Path = item.FileSystemPath ?? item.ParsingName,
+                DisplayName = item.FileSystemPath is null ? item.DisplayName : "",
+            }).ToList();
+            var sameGroup = data.GetData(VirtualDragFormat) is string sourceId && sourceId == _box.Id;
+            if (!sameGroup) VirtualGroups.Add(_config, _box, entries);
+            ReloadItems();
+            var keys = entries.Select(entry => VirtualGroups.Key(entry.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            ApplyOrder(_items.Where(item => keys.Contains(item.Path)).ToList(), insertIndex);
+            if (!sameGroup) NotifyMembershipChanged();
             return;
         }
 
@@ -1054,12 +1110,12 @@ public partial class BoxWindow : Window
     /// <summary>按拖拽落点重排条目，并把顺序写回配置。</summary>
     private void ApplyOrder(IReadOnlyList<BoxItem> moving, int insertIndex)
     {
-        var names = _items.Select(item => Path.GetFileName(item.Path)).ToList();
-        var movingNames = moving.Select(item => Path.GetFileName(item.Path)).ToList();
+        var names = _items.Select(item => OrderKey(item.Path)).ToList();
+        var movingNames = moving.Select(item => OrderKey(item.Path)).ToList();
         var ordered = ItemOrder.Apply(names, movingNames, insertIndex);
 
         var byName = _items
-            .GroupBy(item => Path.GetFileName(item.Path), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(item => OrderKey(item.Path), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
         var rebuilt = ordered.Where(byName.ContainsKey).Select(name => byName[name]).ToList();
@@ -1090,7 +1146,19 @@ public partial class BoxWindow : Window
 
     private void PersistOrder()
     {
-        _box.ItemOrder = _items.Select(item => Path.GetFileName(item.Path)).ToList();
+        // 隐藏项目也保留原顺序，切换“显示隐藏文件”不能丢失它们的位置。
+        var order = _items.Select(item => OrderKey(item.Path)).ToList();
+        order.AddRange(_box.ItemOrder.Where(key => !order.Contains(key, StringComparer.OrdinalIgnoreCase)));
+        _box.ItemOrder = order;
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    private string OrderKey(string path) => _box.IsVirtual ? path : Path.GetFileName(path);
+
+    private void NotifyMembershipChanged()
+    {
+        AttachWatcher();
+        MembershipChanged?.Invoke(this, EventArgs.Empty);
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
@@ -1126,6 +1194,13 @@ public partial class BoxWindow : Window
 
     public void MoveIntoBox(IEnumerable<string> paths)
     {
+        if (_box.IsVirtual)
+        {
+            VirtualGroups.Add(_config, _box, paths.Select(path => new GroupEntry { Path = path }));
+            ReloadItems();
+            NotifyMembershipChanged();
+            return;
+        }
         var folder = Folder;
         var moved = 0;
         var failed = new List<string>();
@@ -1192,11 +1267,14 @@ public partial class BoxWindow : Window
         var data = new DataObject();
         data.SetData(DataFormats.FileDrop, paths);
         data.SetData(BoxDragFormat, Folder);
+        if (_box.IsVirtual) data.SetData(VirtualDragFormat, _box.Id);
         _dragging = true;
         _dragCount++;
         try
         {
-            DragDrop.DoDragDrop(ItemsHost, data, DragDropEffects.Move | DragDropEffects.Copy);
+            DragDrop.DoDragDrop(ItemsHost, data, _box.IsVirtual
+                ? DragDropEffects.Copy | DragDropEffects.Link
+                : DragDropEffects.Move | DragDropEffects.Copy);
         }
         catch (Exception ex)
         {
@@ -1346,8 +1424,18 @@ public partial class BoxWindow : Window
 
         if (single is not null)
         {
-            menu.Items.Add(MenuItem("打开文件所在位置", () => FsUtil.Reveal(single)));
-            menu.Items.Add(MenuItem("重命名…", () => RenameItem(single)));
+            if (!VirtualGroups.IsShell(single))
+            {
+                menu.Items.Add(MenuItem("打开文件所在位置", () => FsUtil.Reveal(single)));
+                menu.Items.Add(MenuItem(_box.IsVirtual ? "重命名原文件…" : "重命名…", () => RenameItem(single)));
+            }
+        }
+
+        if (_box.IsVirtual)
+        {
+            menu.Items.Add(new Separator());
+            menu.Items.Add(MenuItem($"移出分组（保留原文件，共 {paths.Count} 项）", () => RemoveReferences(paths)));
+            return menu;
         }
 
         menu.Items.Add(new Separator());
@@ -1404,8 +1492,9 @@ public partial class BoxWindow : Window
                 }),
                 MenuItem(_box.Collapsed ? "展开" : "收起", ToggleCollapse),
                 new Separator(),
-                MenuItem("打开盒子文件夹", () => FsUtil.OpenFolder(Folder)),
-                MenuItem("解散盒子（内容移回桌面）", Dissolve),
+                MenuItem(_box.IsVirtual ? "打开配置文件夹" : "打开盒子文件夹",
+                    () => FsUtil.OpenFolder(_box.IsVirtual ? ConfigStore.Directory : Folder)),
+                MenuItem(_box.IsVirtual ? "解散分组（保留原文件）" : "解散盒子（内容移回桌面）", Dissolve),
             },
         };
 
@@ -1421,6 +1510,7 @@ public partial class BoxWindow : Window
 
     private void MoveToDesktop(IEnumerable<string> paths)
     {
+        if (_box.IsVirtual) { RemoveReferences(paths); return; }
         foreach (var path in paths)
         {
             try
@@ -1482,7 +1572,7 @@ public partial class BoxWindow : Window
         {
             var safe = FsUtil.Sanitize(input);
             var directory = Path.GetDirectoryName(path)!;
-            var target = Path.Combine(directory, safe + Path.GetExtension(path));
+            var target = Path.Combine(directory, safe);
 
             if (Directory.Exists(path))
             {
@@ -1492,6 +1582,11 @@ public partial class BoxWindow : Window
             else
             {
                 File.Move(path, target);
+            }
+            if (_box.IsVirtual)
+            {
+                VirtualGroups.RenameReference(_config, path, target);
+                NotifyMembershipChanged();
             }
         }
         catch (Exception ex)
@@ -1571,7 +1666,8 @@ public partial class BoxWindow : Window
         try
         {
             var parent = Path.GetDirectoryName(oldFolder);
-            if (Directory.Exists(oldFolder) && !string.IsNullOrEmpty(parent))
+            if (_box.IsVirtual) { /* 虚拟分组重命名只改变标题。 */ }
+            else if (Directory.Exists(oldFolder) && !string.IsNullOrEmpty(parent))
             {
                 var target = FsUtil.UniqueFolder(parent, FsUtil.Sanitize(title));
                 if (!string.Equals(target, oldFolder, StringComparison.OrdinalIgnoreCase))
@@ -2030,6 +2126,12 @@ public partial class BoxWindow : Window
 
     public void Dissolve()
     {
+        if (_box.IsVirtual)
+        {
+            RemoveReferences(_box.Entries.Select(entry => entry.Path).ToList());
+            RemovalRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
         // 直接解散：内容是移回桌面，不删东西，所以不再弹确认框
         MoveToDesktop(_items.Select(i => i.Path).ToList());
 
@@ -2047,6 +2149,16 @@ public partial class BoxWindow : Window
         }
 
         RemovalRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void RemoveReferences(IEnumerable<string> paths)
+    {
+        var removed = paths.ToList();
+        VirtualGroups.Remove(_box, removed);
+        // 旧盒子已有的系统项快捷方式也只解除关联，保留快捷方式本身。
+        foreach (var path in removed) TryRestoreHiddenDesktopIcon(path);
+        ReloadItems();
+        NotifyMembershipChanged();
     }
 
     #endregion

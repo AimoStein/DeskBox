@@ -7,8 +7,8 @@ namespace DeskBox.Services;
 /// <summary>
 /// 一次拖放里解析出来的一项：可能是磁盘真实路径，也可能是 shell 命名空间项
 /// （回收站 / 此电脑 / 控制面板 / 网络这类系统图标）。
-/// FileSystemPath 非空 = 真实路径，按原来的移动语义处理；
-/// FileSystemPath 为空 = 命名空间项，只能按 ParsingName 建 .lnk。
+/// FileSystemPath 非空表示真实路径，为空表示命名空间项。
+/// 调用方决定保存原路径引用，还是按旧版盒子的规则处理。
 /// </summary>
 public readonly record struct ShellDropItem(string? FileSystemPath, string ParsingName, string DisplayName);
 

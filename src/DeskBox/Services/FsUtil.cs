@@ -190,6 +190,11 @@ public static class FsUtil
     {
         try
         {
+            if (ShellItemInterop.LooksLikeParsingName(path))
+            {
+                Process.Start(new ProcessStartInfo("explorer.exe", Quote(path)) { UseShellExecute = true });
+                return;
+            }
             Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
         catch (Exception ex)
