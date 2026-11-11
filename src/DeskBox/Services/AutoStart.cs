@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Principal;
 using Microsoft.Win32;
 
 namespace DeskBox.Services;
@@ -25,6 +26,7 @@ public static class AutoStart
 
     /// <summary>任务计划程序里的任务名（根目录下）。</summary>
     internal const string TaskName = "DeskBox";
+    private const string FastStartKey = @"Software\DeskBox\FastStart";
 
     /// <summary>
     /// 任务描述里带版本号：升级后第一次启动会重新注册任务（顺便更新 exe 路径与重启策略）。
@@ -49,6 +51,7 @@ public static class AutoStart
     {
         get
         {
+            if (FastTaskExists() && ReadFastStartPath() is not null) return true;
             try
             {
                 dynamic service = CreateService()!;
@@ -104,6 +107,12 @@ public static class AutoStart
                 return;
             }
 
+            if (FastTaskExists())
+            {
+                EnableFastStart(ContextMenuRegistrar.ExecutablePath);
+                return;
+            }
+
             if (MatchesCurrentExe())
             {
                 // 任务已经是指向当前 exe 的登录任务：顺手清掉可能残留的旧 Run 值
@@ -123,6 +132,12 @@ public static class AutoStart
     {
         var exe = ContextMenuRegistrar.ExecutablePath;
 
+        if (FastTaskExists())
+        {
+            EnableFastStart(exe);
+            return;
+        }
+
         if (TryRegisterLogonTask(exe))
         {
             RemoveRunValue();
@@ -134,8 +149,19 @@ public static class AutoStart
         Log.Warn("开机自启：任务计划程序注册失败，已退回 HKCU Run（开机时可能被系统延后启动）");
     }
 
+    private static void EnableFastStart(string exe)
+    {
+        using var key = Registry.CurrentUser.CreateSubKey(FastStartKey);
+        key.SetValue("Executable", exe);
+        TryDeleteLogonTask();
+        SetRunValue(exe); // 快速任务失败时仍由 Explorer 启动，单实例锁负责合流。
+        Log.Info("开机自启：已启用快速登录启动器，HKCU Run 保留为回退");
+    }
+
     private static void Disable()
     {
+        using var key = Registry.CurrentUser.OpenSubKey(FastStartKey, writable: true);
+        key?.DeleteValue("Executable", throwOnMissingValue: false);
         TryDeleteLogonTask();
         RemoveRunValue();
         Log.Info("开机自启：已关闭（任务计划程序任务与 Run 值均已清理）");
@@ -182,6 +208,29 @@ public static class AutoStart
         {
             return false;
         }
+    }
+
+    private static string? ReadFastStartPath()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(FastStartKey);
+        return key?.GetValue("Executable") as string;
+    }
+
+    private static bool FastTaskExists()
+    {
+        try
+        {
+            using var user = WindowsIdentity.GetCurrent();
+            var helper = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "DeskBox Fast Start", user.User!.Value, "DeskBoxFastStart.exe");
+            if (!File.Exists(helper)) return false;
+            dynamic service = CreateService();
+            dynamic root = service.GetFolder("\\");
+            dynamic task = root.GetTask("DeskBox Fast Start " + user.User.Value);
+            return task.Enabled && string.Equals((string)task.Definition.Actions.Item(1).Path,
+                helper, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private static bool TryRegisterLogonTask(string exe)

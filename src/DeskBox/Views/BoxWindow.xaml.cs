@@ -59,6 +59,8 @@ public partial class BoxWindow : Window
 
     /// <summary>当前把本窗口挂在哪个桌面窗口的 owner 上（Zero 表示还没挂）。</summary>
     private IntPtr _desktopOwner;
+    private readonly Func<string, bool>? _itemVisible;
+    internal Action<string>? MergeShortcut { get; init; }
 
     /// <summary>窗口是否收到过 WM_CLOSE：用户/程序主动关闭走 WM_CLOSE，被 owner 销毁不走。</summary>
     private bool _receivedCloseMessage;
@@ -66,7 +68,8 @@ public partial class BoxWindow : Window
     // 按下时固定列宽，整段拖动使用相同列宽。
     private double _resizeCellWidth;
 
-    public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell, Func<string, IReadOnlyList<BoxRect>>? peers = null)
+    public BoxWindow(AppConfig config, BoxConfig box, DesktopShell shell, Func<string, IReadOnlyList<BoxRect>>? peers = null,
+        Func<string, bool>? itemVisible = null)
     {
         var startupWatch = StartupTrace.IsStartup ? Stopwatch.StartNew() : null;
 
@@ -74,6 +77,7 @@ public partial class BoxWindow : Window
         _box = box;
         _shell = shell;
         _peers = peers;
+        _itemVisible = itemVisible;
 
         InitializeComponent();
         var xamlMs = startupWatch?.ElapsedMilliseconds ?? 0;
@@ -855,6 +859,7 @@ public partial class BoxWindow : Window
         });
 
         // 用户手动拖出来的顺序优先，没记录过的（新放进来的）按上面的默认规则排在后面
+        if (_itemVisible is { } visible) paths.RemoveAll(path => !visible(path));
         paths = ItemOrder.Sort(paths, _box.ItemOrder, OrderKey);
 
         // 复用现有条目和容器：重复的文件监视事件不能先清空整个盒子再重建。
@@ -895,6 +900,27 @@ public partial class BoxWindow : Window
         SystemIconGuard.EnsureHidden(paths);
 
         FitContentHeight();
+    }
+
+    internal StartupDesktopBox Snapshot()
+    {
+        var items = new List<StartupDesktopItem>();
+        var viewport = new Rect(0, 0, Scroller.ViewportWidth, Scroller.ViewportHeight);
+        foreach (var item in _items)
+        {
+            if (ItemsHost.ItemContainerGenerator.ContainerFromItem(item) is not FrameworkElement element ||
+                element.ActualWidth <= 0 || element.ActualHeight <= 0)
+                continue;
+            var contentPoint = element.TranslatePoint(new Point(), Scroller);
+            var bounds = new Rect(contentPoint, element.RenderSize);
+            if (!viewport.IntersectsWith(bounds)) continue;
+            var point = element.TranslatePoint(new Point(), this);
+            items.Add(StartupDesktopItem.Create(item.Path, item.Name, point.X - ShadowPad, point.Y - ShadowPad,
+                element.ActualWidth, element.ActualHeight, item.IconSize));
+        }
+        var box = ContentRect;
+        return new StartupDesktopBox(_box.Title, box.X, box.Y, box.Width, box.Height, _box.ListView,
+            _box.Collapsed ? Array.Empty<StartupDesktopItem>() : items);
     }
 
     private static async Task LoadIconAsync(BoxItem item)
@@ -1429,6 +1455,8 @@ public partial class BoxWindow : Window
                 menu.Items.Add(MenuItem("打开文件所在位置", () => FsUtil.Reveal(single)));
                 menu.Items.Add(MenuItem(_box.IsVirtual ? "重命名原文件…" : "重命名…", () => RenameItem(single)));
             }
+            if (MergeShortcut is { } merge && ShortcutIdentity.IsShortcut(single))
+                menu.Items.Add(MenuItem("合并同应用的快捷方式…", () => merge(single)));
         }
 
         if (_box.IsVirtual)

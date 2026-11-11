@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Principal;
 using System.Windows;
 using System.Windows.Threading;
 using DeskBox.Interop;
@@ -81,7 +82,14 @@ public partial class App : Application
         StartupTrace.Mark("App 构造（WPF 入口）");
     }
 
-    protected override void OnStartup(StartupEventArgs e)
+    internal App(AppInstance? instance, DesktopIconLayer iconLayer, StartupDesktop? startupDesktop) : this()
+    {
+        _instance = instance;
+        _iconLayer = iconLayer;
+        _startupDesktop = startupDesktop;
+    }
+
+    protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
@@ -125,16 +133,12 @@ public partial class App : Application
             return;
         }
 
-        _instance = new AppInstance();
-        if (!_instance.TryAcquire())
+        _instance!.CommandReceived += args => Dispatcher.BeginInvoke(() =>
         {
-            // 已经有实例在跑：把这次的参数交给它
-            AppInstance.SendToPrimary(e.Args);
-            Shutdown();
-            return;
-        }
-
-        _instance.CommandReceived += args => Dispatcher.Invoke(() => HandleArgs(args));
+            if (_exiting) return;
+            if (_desktopActive) HandleArgs(args);
+            else _startupCommands.Add(args);
+        });
         _instance.StartServer();
         _ownsConfig = true;
         LogStartupStage("单实例锁");
@@ -149,7 +153,6 @@ public partial class App : Application
         };
 
         _config = ConfigStore.Load();
-        if (DesktopFolderRecovery.Recover(_config)) ConfigStore.Save(_config);
         if (VirtualGroups.Migrate(_config)) ConfigStore.Save(_config);
         _lastShowHiddenFiles = _config.ShowHiddenFiles;
         LogStartupStage($"配置读取（盒子 {_config.Boxes.Count} 个）");
@@ -181,6 +184,7 @@ public partial class App : Application
         {
             _saveTimer!.Stop();
             ConfigStore.Save(_config);
+            SaveDesktopSnapshot();
         };
 
         _folderRecoveryTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -191,9 +195,9 @@ public partial class App : Application
         {
             if (_exiting) return;
             foreach (var box in _boxes) box.RecheckReferenceLocations();
-            var recovered = DesktopFolderRecovery.Recover(_config);
             var migrated = VirtualGroups.Migrate(_config);
-            if (!recovered && !migrated) return;
+            if (!migrated) return;
+            RequestDesktopScan();
             foreach (var box in _boxes) box.RefreshFromConfig(reloadItems: true);
             ConfigStore.Save(_config);
         };
@@ -213,6 +217,12 @@ public partial class App : Application
         WatchForegroundChanges();
         WatchDesktopWindowAppearance();
         LogStartupStage("前台/桌面监听");
+
+        // 扫描在后台执行。快照窗口用独立 STA 绘制，此时已经可以使用。
+        _desktopCatalog = await ScanDesktopAsync();
+        if (_exiting) return;
+        UpdateDesktopPresentation(reloadBoxes: false);
+        EnsureDesktopIconWindow();
 
         // 先把格子显示出来；托盘、鼠标钩子、开机自启同步都排到首帧之后，缩短"看不见"的时间
         RestoreBoxes();
@@ -246,21 +256,7 @@ public partial class App : Application
         // 继续观测一小段时间，到点自动关掉启动日志。
         StartupTrace.EndStartupAfter(TimeSpan.FromMilliseconds(2500));
 
-        // 托盘、鼠标钩子、右键菜单清理、自启同步都不影响"盒子出现"，排到首帧渲染之后的空闲优先级，
-        // 别和第一个窗口抢 UI 线程。
-        var startupFirstRun = firstRun;
-        var startupArgs = e.Args;
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
-        {
-            try
-            {
-                FinishStartupWork(startupFirstRun, startupArgs);
-            }
-            catch (Exception ex)
-            {
-                Log.Warn("启动收尾失败: " + ex);
-            }
-        }));
+        CompleteDesktopStartup(firstRun, e.Args);
     }
 
     /// <summary>
@@ -269,6 +265,8 @@ public partial class App : Application
     /// </summary>
     private void FinishStartupWork(bool firstRun, string[] args)
     {
+        StartDesktopWatch();
+        ScheduleSave();
         if (firstRun && _boxes.Count == 0)
         {
             CreateNewBox();
@@ -326,6 +324,8 @@ public partial class App : Application
         {
             ShowSettings();
         }
+        foreach (var command in _startupCommands) HandleArgs(command);
+        _startupCommands.Clear();
     }
 
     /// <summary>
@@ -438,7 +438,9 @@ public partial class App : Application
                 // 取不到就算了
             }
 
-            Log.Info($"[启动] 开机上下文：系统已启动 {bootMs}ms，Explorer {explorer}，本进程自启动 {StartupTrace.SinceProcessStartMs}ms");
+            using var user = WindowsIdentity.GetCurrent();
+            var elevated = new WindowsPrincipal(user).IsInRole(WindowsBuiltInRole.Administrator);
+            Log.Info($"[启动] 开机上下文：系统已启动 {bootMs}ms，Explorer {explorer}，本进程自启动 {StartupTrace.SinceProcessStartMs}ms，PID={Environment.ProcessId}，已提权={elevated}");
         }
         catch (Exception ex)
         {
@@ -558,7 +560,10 @@ public partial class App : Application
         _desktopShowProc = (_, _, hwnd, idObject, idChild, _, _) =>
         {
             // 只要窗口对象本身（OBJID_WINDOW / CHILDID_SELF）
-            if (idObject != 0 || idChild != 0 || !NativeMethods.IsDesktopWindow(hwnd))
+            if (idObject != 0 || idChild != 0 ||
+                (!NativeMethods.IsDesktopWindow(hwnd) &&
+                 !(NativeMethods.ClassNameOf(hwnd) == "SysListView32" && hwnd ==
+                    NativeMethods.FindWindowEx(NativeMethods.FindDesktopDefView(), IntPtr.Zero, "SysListView32", null))))
             {
                 return;
             }
@@ -580,6 +585,8 @@ public partial class App : Application
                 // 并把旧的、已经被系统销毁的盒子窗口重建出来。
                 EnsureDesktopOwners(NativeMethods.DesktopOwnerWindow());
                 RecoverLostBoxesNow();
+                RefreshDesktopLayer();
+                RequestDesktopScan();
 
                 ScheduleDesktopSweep();
             }));
@@ -896,6 +903,7 @@ public partial class App : Application
         {
             box.AttachToDesktop(desktopOwner);
         }
+        _desktopWindow?.Attach(desktopOwner);
     }
 
     /// <summary>
@@ -961,6 +969,7 @@ public partial class App : Application
         // 桌面窗口可能刚被 Explorer 重建：把盒子窗口的 owner 重新挂到当前桌面窗口上。
         var desktopRoot = NativeMethods.DesktopRoot();
         EnsureDesktopOwners(NativeMethods.DesktopOwnerWindow());
+        RefreshDesktopLayer();
 
         // 点任务栏 / 开始菜单 / 任务栏缩略图时完全跳过（安全网定时器也可能在这时触发）
         if (NativeMethods.IsShellTrayWindow(NativeMethods.GetForegroundWindow()))
@@ -1144,15 +1153,19 @@ public partial class App : Application
     {
         var watch = Stopwatch.StartNew();
 
-        var window = new BoxWindow(_config, boxConfig, _shell, PeerRects)
+        var window = new BoxWindow(_config, boxConfig, _shell, PeerRects, path => IsBoxItemVisible(boxConfig, path))
         {
             ShowActivated = false,
+            Opacity = _desktopActive ? 1 : 0,
+            MergeShortcut = MergeShortcut,
         };
 
         window.Changed += (_, _) => ScheduleSave();
         window.MembershipChanged += (_, _) =>
         {
+            UpdateDesktopPresentation(reloadBoxes: false);
             foreach (var box in _boxes) box.RefreshFromConfig(reloadItems: true);
+            RequestDesktopScan();
             ScheduleSave();
         };
         window.RemovalRequested += (sender, _) => RemoveBox((BoxWindow)sender!);
@@ -1196,6 +1209,8 @@ public partial class App : Application
         _boxes.Remove(window);
         _config.Boxes.Remove(window.Config);
         window.Close();
+        UpdateDesktopPresentation();
+        RequestDesktopScan();
         ConfigStore.Save(_config);
     }
 
@@ -1225,13 +1240,6 @@ public partial class App : Application
         }
 
         Log.Warn($"盒子「{window.Config.Title}」窗口被系统销毁（多半是 Explorer 重启），准备自动重建。");
-
-        // 全部盒子窗口一起被销毁时，WPF 默认会在最后一个窗口关闭后退出进程；
-        // 切到显式退出把进程留住，等重建定时器把新的盒子窗口建出来。
-        if (Application.Current.ShutdownMode == ShutdownMode.OnLastWindowClose)
-        {
-            Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        }
 
         ScheduleBoxRecovery();
     }
@@ -1276,11 +1284,6 @@ public partial class App : Application
             if (_boxRecoveryTimer is not null)
             {
                 _boxRecoveryTimer.Stop();
-            }
-
-            if (Application.Current.ShutdownMode == ShutdownMode.OnExplicitShutdown)
-            {
-                Application.Current.ShutdownMode = ShutdownMode.OnLastWindowClose;
             }
 
             return;
@@ -1599,7 +1602,8 @@ public partial class App : Application
         var root = _config.EffectiveBoxRoot;
         var assigned = _config.Boxes.Where(box => box.IsVirtual).SelectMany(box => box.Entries)
             .Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var items = _shell.EnumerateItems(root, _config.ShowHiddenFiles)
+        var items = (_desktopPresentation?.Desktop.Where(item => !VirtualGroups.IsShell(item.Path))
+                         .Select(item => item.Path) ?? _shell.EnumerateItems(root, _config.ShowHiddenFiles))
             .Where(path => !assigned.Contains(VirtualGroups.Key(path))).ToList();
         var plan = Organizer.BuildPlan(items, _config.OrganizeShortcuts, out var skipped);
 
@@ -1638,6 +1642,8 @@ public partial class App : Application
 
         _config.LastOrganize = result.Moves;
         _config.LastOrganizeTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        UpdateDesktopPresentation();
+        RequestDesktopScan();
         ConfigStore.Save(_config);
 
         foreach (var box in _boxes)
@@ -1677,6 +1683,8 @@ public partial class App : Application
         }
 
         var restored = VirtualGroups.Undo(_config, _config.LastOrganize);
+        UpdateDesktopPresentation();
+        RequestDesktopScan();
         if (_config.LastOrganize.Count == 0) _config.LastOrganizeTime = string.Empty;
         ConfigStore.Save(_config);
 
@@ -1693,12 +1701,9 @@ public partial class App : Application
 
     private void ToggleIconsFromUser()
     {
-        var wantVisible = !_shell.IconsVisible;
-        if (!_shell.SetIconsVisible(wantVisible))
-        {
-            return;
-        }
-        _config.IconsHiddenByApp = !wantVisible;
+        _config.IconsHiddenByApp = !_config.IconsHiddenByApp;
+        var wantVisible = !_config.IconsHiddenByApp;
+        UpdateDesktopVisibility();
         SyncTaskbarVisibility();
 
         if (_config.HideBoxesWithIcons)
@@ -1821,6 +1826,7 @@ public partial class App : Application
         _exiting = true;
         _saveTimer?.Stop();
         _taskbar?.Dispose();
+        SaveDesktopSnapshot();
 
         if (_config.RestoreIconsOnExit && _config.IconsHiddenByApp)
         {
@@ -1833,7 +1839,6 @@ public partial class App : Application
         StopWatchingForeground();
         _mouseWatcher?.Dispose();
         _tray?.Dispose();
-        _instance?.Dispose();
 
         Shutdown();
     }
@@ -1851,9 +1856,9 @@ public partial class App : Application
             StopWatchingForeground();
             _mouseWatcher?.Dispose();
             _tray?.Dispose();
-            _instance?.Dispose();
         }
 
+        StopDesktopWatch();
         base.OnExit(e);
     }
 
@@ -1868,7 +1873,7 @@ public partial class App : Application
             return;
         }
 
-        _tray.ItemToggleIcons.Text = _shell.IconsVisible ? "隐藏桌面图标" : "显示桌面图标";
+        _tray.ItemToggleIcons.Text = _config.IconsHiddenByApp ? "显示桌面图标" : "隐藏桌面图标";
         _tray.ItemUndo.Enabled = _config.LastOrganize.Count > 0;
         _tray.ItemBoxRoot.Text = $"打开分组配置文件夹（{_boxes.Count} 个分组）";
     }
@@ -1886,6 +1891,7 @@ public partial class App : Application
 
         var hiddenFilesChanged = _config.ShowHiddenFiles != _lastShowHiddenFiles;
         _lastShowHiddenFiles = _config.ShowHiddenFiles;
+        if (hiddenFilesChanged) RequestDesktopScan();
 
         foreach (var box in _boxes)
         {
@@ -1896,7 +1902,7 @@ public partial class App : Application
 
     private void SyncTaskbarVisibility()
     {
-        var hidden = _config.HideTaskbarWithIcons && _config.IconsHiddenByApp && !_shell.IconsVisible;
+        var hidden = _config.HideTaskbarWithIcons && _config.IconsHiddenByApp;
         if (hidden)
         {
             _taskbar ??= new DesktopTaskbar();

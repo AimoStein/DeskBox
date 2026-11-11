@@ -29,6 +29,14 @@ try {
     $folder = $service.GetFolder('\')
     Write-Output '任务服务连接/根目录访问: 成功'
     try {
+        $fastTask = $folder.GetTask("DeskBox Fast Start $($identity.User.Value)")
+        $fastKey = Get-ItemProperty 'HKCU:\Software\DeskBox\FastStart' -ErrorAction SilentlyContinue
+        Write-Output "DeskBox 快速登录任务: Enabled=$($fastTask.Enabled)，LastRunTime=$($fastTask.LastRunTime)，LastTaskResult=$($fastTask.LastTaskResult)"
+        Write-Output "DeskBox 快速启动目标: $($fastKey.Executable)"
+    } catch {
+        Write-Output ('DeskBox 快速登录任务查询: ' + $_.Exception.Message)
+    }
+    try {
         $task = $folder.GetTask('DeskBox')
         Write-Output "DeskBox 任务: Enabled=$($task.Enabled)，LastTaskResult=$($task.LastTaskResult)"
         Write-Output $task.Xml

@@ -7,8 +7,30 @@ using DeskBox.Services;
 
 namespace DeskBox.Rendering;
 
+internal class WallpaperFrame : IDisposable
+{
+    internal Rect Bounds { get; private protected set; }
+    internal ID3D11Texture2D? Texture { get; private protected set; }
+    internal long Frames { get; private protected set; }
+
+    private protected WallpaperFrame() { }
+
+    internal WallpaperFrame(Rect bounds, ID3D11Texture2D texture)
+    {
+        Bounds = bounds;
+        Texture = texture;
+        Frames = 1;
+    }
+
+    public virtual void Dispose()
+    {
+        Texture?.Dispose();
+        Texture = null;
+    }
+}
+
 /// <summary>One capture session per wallpaper window. Frames stay on the GPU.</summary>
-internal sealed class WallpaperCapture : IDisposable
+internal sealed class WallpaperCapture : WallpaperFrame
 {
     private readonly IDirect3DDevice _device;
     private Direct3D11CaptureFramePool? _pool;
@@ -17,9 +39,6 @@ internal sealed class WallpaperCapture : IDisposable
     private Windows.Graphics.SizeInt32 _size;
     internal nint Window { get; }
     internal nint CaptureWindow { get; private set; }
-    internal Rect Bounds { get; private set; }
-    internal ID3D11Texture2D? Texture { get; private set; }
-    internal long Frames { get; private set; }
     private volatile bool _closed;
     internal bool Closed => _closed;
 
@@ -33,7 +52,7 @@ internal sealed class WallpaperCapture : IDisposable
             try { _item = GlassInterop.CreateItem(window); }
             catch (ArgumentException)
             {
-                // Wallpaper Engine video is a child HWND. WGC accepts its top-level desktop host.
+                // The wallpaper renderer can be a child HWND. WGC accepts its top-level desktop host.
                 CaptureWindow = GlassInterop.GetAncestor(window, 2);
                 if (CaptureWindow == 0 || CaptureWindow == window) throw;
                 _item = GlassInterop.CreateItem(CaptureWindow);
@@ -89,13 +108,13 @@ internal sealed class WallpaperCapture : IDisposable
             Bounds = new Rect(rect.Left, rect.Top, Math.Max(1, rect.Right - rect.Left), Math.Max(1, rect.Bottom - rect.Top));
     }
 
-    public void Dispose()
+    public override void Dispose()
     {
         _closed = true;
         _session?.Dispose(); _session = null;
         _pool?.Dispose(); _pool = null;
         if (_item is not null) _item.Closed -= ItemClosed;
         _item = null;
-        Texture?.Dispose(); Texture = null;
+        base.Dispose();
     }
 }

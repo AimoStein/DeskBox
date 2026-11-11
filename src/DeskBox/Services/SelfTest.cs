@@ -44,35 +44,6 @@ public static class SelfTest
 
             Directory.CreateDirectory(desktop);
 
-            // 模拟 OneDrive 桌面迁移：旧空目录不能遮住新位置，独立目录不能误绑定。
-            var redirectedDesktop = Path.Combine(sandbox, "OneDrive", "Desktop");
-            var migrationDesktop = Path.Combine(sandbox, "old-desktop");
-            var oldRoot = Path.Combine(migrationDesktop, "桌面整理");
-            var newRoot = Path.Combine(redirectedDesktop, "桌面整理");
-            var migration = new AppConfig { BoxRoot = oldRoot, Boxes = new()
-            {
-                new() { Title = "已迁移", Folder = Path.Combine(oldRoot, "已迁移") },
-                new() { Title = "旧空目录", Folder = Path.Combine(oldRoot, "旧空目录") },
-                new() { Title = "仍有文件", Folder = Path.Combine(oldRoot, "仍有文件") },
-                new() { Title = "尚未到达", Folder = Path.Combine(oldRoot, "尚未到达") },
-                new() { Title = "独立目录", Folder = Path.Combine(sandbox, "独立目录") },
-            } };
-            foreach (var name in new[] { "已迁移", "旧空目录", "仍有文件" })
-                Directory.CreateDirectory(Path.Combine(newRoot, name));
-            Directory.CreateDirectory(migration.Boxes[1].Folder);
-            Directory.CreateDirectory(migration.Boxes[2].Folder);
-            File.WriteAllText(Path.Combine(migration.Boxes[2].Folder, "保留.txt"), "keep");
-            Check("迁移-恢复目录", DesktopFolderRecovery.Recover(migration, migrationDesktop, redirectedDesktop));
-            Check("迁移-缺失目录重绑", migration.Boxes[0].Folder == Path.Combine(newRoot, "已迁移"));
-            Check("迁移-空目录重绑", migration.Boxes[1].Folder == Path.Combine(newRoot, "旧空目录"));
-            Check("迁移-保留非空旧目录", migration.Boxes[2].Folder == Path.Combine(oldRoot, "仍有文件"));
-            Check("迁移-目标未到达保留配置", migration.Boxes[3].Folder == Path.Combine(oldRoot, "尚未到达") && migration.BoxRoot == oldRoot);
-            Check("迁移-独立目录不变", migration.Boxes[4].Folder == Path.Combine(sandbox, "独立目录"));
-            Directory.CreateDirectory(Path.Combine(newRoot, "尚未到达"));
-            Check("迁移-延迟到达可重试", DesktopFolderRecovery.Recover(migration, migrationDesktop, redirectedDesktop) && migration.Boxes[3].Folder == Path.Combine(newRoot, "尚未到达"));
-            Check("迁移-重复检查不修改", !DesktopFolderRecovery.Recover(migration, migrationDesktop, redirectedDesktop));
-            Check("迁移-旧文件未移动", File.ReadAllText(Path.Combine(oldRoot, "仍有文件", "保留.txt")) == "keep");
-
             var samples = new[]
             {
                 "合同.docx", "照片.png", "片子.mp4", "资料.zip",
@@ -1280,6 +1251,7 @@ public static class SelfTest
 
         UpdateSelfTest.Run(Check);
         VirtualGroupSelfTest.Run(Check, sandbox);
+        DesktopCatalogSelfTest.Run(Check, sandbox);
         report.AppendLine();
         report.AppendLine(failures == 0 ? "自检结果：全部通过" : $"自检结果：{failures} 项失败");
 

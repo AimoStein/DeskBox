@@ -17,29 +17,34 @@ namespace DeskBox.Rendering;
 /// <summary>Shared GPU device and capture sessions for all desktop boxes. UI-thread owned.</summary>
 internal sealed class LiquidGlassEngine : IDisposable
 {
-    // 捕获会话重建（例如 Win+D 后 Wallpaper Engine 窗口重建）期间暂时没有新帧时，
+    // 捕获会话重建（例如 Win+D 后壁纸窗口重建）期间暂时没有新帧时，
     // 最多沿用 GlassSurface 里最后一帧的时长，超过后才回退普通背景。
     private const long FrameFreezeMs = 4000;
     private static LiquidGlassEngine? _current;
     private readonly List<GlassSurface> _surfaces = new();
     private readonly List<WallpaperCapture> _captures = new();
+    private readonly Dictionary<StaticWallpaper.Monitor, WallpaperFrame> _staticWallpapers = new();
+    private readonly CancellationTokenSource _staticCancellation = new();
+    private Task<Dictionary<StaticWallpaper.Monitor, StaticWallpaper.Pixels?>>? _staticLoad;
     private readonly Dictionary<nint, long> _failed = new();
     private readonly IDirect3D9Ex _direct9;
-    private readonly IDirect3DDevice _winrtDevice;
+    private readonly IDirect3DDevice? _winrtDevice;
     private readonly ID3D11VertexShader _vertex;
     private readonly ID3D11PixelShader _pixel;
     private readonly ID3D11PixelShader _blurPixel;
-    private readonly Dictionary<WallpaperCapture, BlurBuffer> _blurBuffers = new();
+    private readonly Dictionary<WallpaperFrame, BlurBuffer> _blurBuffers = new();
     private readonly ID3D11Buffer _constants;
     private readonly ID3D11SamplerState _sampler;
     private readonly ID3D11Query _completion;
     private readonly DispatcherTimer _timer;
     private long _nextDiscover;
+    private long _nextStaticCheck;
     private bool _disposed;
     internal ID3D11Device Device { get; }
     internal ID3D11DeviceContext Context { get; }
     internal IDirect3DDevice9Ex Device9 { get; }
     internal IReadOnlyList<WallpaperCapture> Captures => _captures;
+    internal IEnumerable<WallpaperFrame> StaticWallpapers => _staticWallpapers.Values;
     internal IReadOnlyList<GlassSurface> Surfaces => _surfaces;
     internal double LastTickMilliseconds { get; private set; }
     internal long Ticks { get; private set; }
@@ -51,12 +56,16 @@ internal sealed class LiquidGlassEngine : IDisposable
         Directory.CreateDirectory(output);
         File.WriteAllText(Path.Combine(output, "renderer.txt"),
             $"dark={ThemeManager.IsDark}; ticks={Ticks}; tickMs={LastTickMilliseconds:F2}\n{SurfaceStatus}\n" +
-            string.Join("\n", _captures.Select(c => $"window={c.Window}; host={c.CaptureWindow}; frames={c.Frames}; bounds={c.Bounds}")));
+            string.Join("\n", _captures.Select(c => $"window={c.Window}; host={c.CaptureWindow}; frames={c.Frames}; bounds={c.Bounds}")
+                .Concat(_staticWallpapers.Values.Select(frame => $"static wallpaper; bounds={frame.Bounds}"))));
         for (var i = 0; i < _surfaces.Count; i++)
             _surfaces[i].SaveFrame(Path.Combine(output, $"surface-{i}.png"));
         for (var i = 0; i < _captures.Count; i++)
             if (_captures[i].Texture is { } texture)
                 GlassPreview.SaveTexture(this, texture, Path.Combine(output, $"wallpaper-{i}.png"));
+        var staticIndex = 0;
+        foreach (var frame in _staticWallpapers.Values)
+            GlassPreview.SaveTexture(this, frame.Texture!, Path.Combine(output, $"static-wallpaper-{staticIndex++}.png"));
     }
 
     private LiquidGlassEngine(nint window)
@@ -64,12 +73,15 @@ internal sealed class LiquidGlassEngine : IDisposable
         var watch = Stopwatch.StartNew();
         try
         {
-        if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("Windows 不支持实时画面捕获。");
         Vortice.Direct3D11.D3D11.D3D11CreateDevice((Vortice.DXGI.IDXGIAdapter?)null, DriverType.Hardware,
             DeviceCreationFlags.BgraSupport, [FeatureLevel.Level_11_0], out ID3D11Device device, out ID3D11DeviceContext context).CheckError();
         Device = device; Context = context;
         var deviceMs = watch.ElapsedMilliseconds;
-        _winrtDevice = GlassInterop.CreateWinRtDevice(device);
+        try
+        {
+            if (GraphicsCaptureSession.IsSupported()) _winrtDevice = GlassInterop.CreateWinRtDevice(device);
+        }
+        catch (System.Runtime.InteropServices.COMException ex) { Log.Warn("动态壁纸捕获不可用: " + ex.Message); }
         _direct9 = D3D9.Direct3DCreate9Ex();
         Device9 = _direct9.CreateDeviceEx(0, DeviceType.Hardware, window,
             CreateFlags.HardwareVertexProcessing | CreateFlags.Multithreaded | CreateFlags.FpuPreserve,
@@ -120,12 +132,14 @@ internal sealed class LiquidGlassEngine : IDisposable
 
     private void Discover()
     {
-        foreach (var capture in _captures.Where(c => c.Closed || !GlassInterop.IsWindow(c.Window)).ToArray())
+        if (_winrtDevice is null) return;
+        var windows = GlassInterop.FindWallpaperWindows();
+        foreach (var capture in _captures.Where(c => c.Closed || !windows.Contains(c.Window) ||
+            (c.CaptureWindow != c.Window && GlassInterop.GetAncestor(c.Window, 2) != c.CaptureWindow)).ToArray())
         {
             _captures.Remove(capture); capture.Dispose();
             if (_blurBuffers.Remove(capture, out var blur)) blur.Dispose();
         }
-        var windows = GlassInterop.FindWallpaperWindows();
         foreach (var stale in _failed.Keys.Where(h => !windows.Contains(h)).ToArray()) _failed.Remove(stale);
         foreach (var window in windows)
         {
@@ -137,7 +151,7 @@ internal sealed class LiquidGlassEngine : IDisposable
                 var capture = new WallpaperCapture(_winrtDevice, window);
                 if (_captures.Any(c => c.CaptureWindow == capture.CaptureWindow)) { capture.Dispose(); continue; }
                 _captures.Add(capture);
-                Log.Info($"Liquid Glass: 已开始捕获 Wallpaper Engine 窗口 {window}。");
+                Log.Info($"Liquid Glass: 已开始捕获动态壁纸窗口 {window}。");
             }
             catch (Exception ex)
             {
@@ -145,6 +159,47 @@ internal sealed class LiquidGlassEngine : IDisposable
                 Log.Warn($"Liquid Glass: 壁纸窗口 {window} 捕获失败: {ex.Message}");
             }
         }
+    }
+
+    private void RefreshStaticWallpapers(IReadOnlyList<GlassSurface> active)
+    {
+        if (_staticLoad is { IsCompleted: true } pending)
+        {
+            _staticLoad = null;
+            Dictionary<StaticWallpaper.Monitor, StaticWallpaper.Pixels?>? result = null;
+            try { result = pending.GetAwaiter().GetResult(); }
+            catch (Exception ex) { Log.Warn("无法读取 Windows 壁纸设置: " + ex.Message); }
+            if (result is not null)
+            {
+                foreach (var monitor in _staticWallpapers.Keys.Where(monitor => !result.ContainsKey(monitor)).ToArray())
+                {
+                    var frame = _staticWallpapers[monitor];
+                    if (_blurBuffers.Remove(frame, out var blur)) blur.Dispose();
+                    frame.Dispose();
+                    _staticWallpapers.Remove(monitor);
+                }
+                var uploaded = 0;
+                foreach (var (monitor, pixels) in result)
+                {
+                    if (pixels is null) continue;
+                    _staticWallpapers.Add(monitor, pixels.Upload(Device, monitor.Bounds));
+                    uploaded++;
+                }
+                if (uploaded > 0) Log.Info($"Liquid Glass: 已加载 {uploaded} 个显示器的静态壁纸纹理。");
+            }
+        }
+
+        var now = Environment.TickCount64;
+        if (_staticLoad is not null || now < _nextStaticCheck) return;
+        if (active.All(surface => BestFrame(_captures, surface.GetBounds()) is not null))
+        {
+            _nextStaticCheck = now + 200;
+            return;
+        }
+        var existing = _staticWallpapers.Keys.ToHashSet();
+        var token = _staticCancellation.Token;
+        _staticLoad = Task.Run(() => StaticWallpaper.Read(existing, token), token);
+        _nextStaticCheck = now + 3000;
     }
 
     private void Tick(object? sender, EventArgs args)
@@ -156,9 +211,17 @@ internal sealed class LiquidGlassEngine : IDisposable
             // Hidden boxes should not keep capturing/processing a 4K video background.
             foreach (var capture in _captures) capture.Dispose();
             _captures.Clear();
+            foreach (var frame in _staticWallpapers.Values) frame.Dispose();
+            _staticWallpapers.Clear();
             foreach (var blur in _blurBuffers.Values) blur.Dispose();
             _blurBuffers.Clear();
             _nextDiscover = 0;
+            _nextStaticCheck = 0;
+            if (_staticLoad is { IsCompleted: true })
+            {
+                _ = _staticLoad.Exception;
+                _staticLoad = null;
+            }
             return;
         }
         var start = Stopwatch.GetTimestamp();
@@ -167,15 +230,19 @@ internal sealed class LiquidGlassEngine : IDisposable
             if (Environment.TickCount64 >= _nextDiscover)
             { Discover(); _nextDiscover = Environment.TickCount64 + 3000; }
             foreach (var capture in _captures) capture.Poll(Device, Context);
+            RefreshStaticWallpapers(active);
             var blurRadius = active.Max(s => s.GetParameters().Material.X);
-            foreach (var capture in _captures.Where(c => c.Texture is not null)) PrepareBlur(capture, blurRadius);
             foreach (var surface in active)
             {
                 var bounds = surface.GetBounds();
-                var capture = _captures.Where(c => c.Texture is not null && !c.Closed)
-                    .OrderByDescending(c => IntersectionArea(c.Bounds, bounds)).FirstOrDefault();
-                if (capture is not null && IntersectionArea(capture.Bounds, bounds) > 0) { surface.Render(capture); continue; }
-                // 捕获会话可能正在重建（例如 Win+D 后 Wallpaper Engine 窗口重建），期间暂时没有可用纹理。
+                var frame = BestFrame(_captures, bounds) ?? BestFrame(_staticWallpapers.Values, bounds);
+                if (frame is not null)
+                {
+                    PrepareBlur(frame, blurRadius);
+                    surface.Render(frame);
+                    continue;
+                }
+                // 捕获会话可能正在重建（例如 Win+D 后壁纸窗口重建），期间暂时没有可用纹理。
                 // 此时保留 D3DImage 里已绘制的最后一帧，避免 SetAvailable(false) 让玻璃背景闪一下；
                 // 超过 FrameFreezeMs 仍没有新帧才回退普通背景，防止画面永久卡在旧帧。
                 if (surface.HasFrame && Environment.TickCount64 - surface.LastDrawTick <= FrameFreezeMs) continue;
@@ -188,6 +255,21 @@ internal sealed class LiquidGlassEngine : IDisposable
             RecoverAfterFailure(ex);
         }
         LastTickMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+    }
+
+    private static WallpaperFrame? BestFrame(IEnumerable<WallpaperFrame> frames, Rect bounds)
+    {
+        WallpaperFrame? best = null;
+        double bestArea = 0;
+        foreach (var frame in frames)
+        {
+            if (frame.Texture is null || frame is WallpaperCapture { Closed: true }) continue;
+            var area = IntersectionArea(frame.Bounds, bounds);
+            if (area <= bestArea) continue;
+            best = frame;
+            bestArea = area;
+        }
+        return best;
     }
 
     // A removed D3D device cannot render again. Release every owner's surface
@@ -207,7 +289,7 @@ internal sealed class LiquidGlassEngine : IDisposable
         return first.IsEmpty ? 0 : first.Width * first.Height;
     }
 
-    private void PrepareBlur(WallpaperCapture capture, float radius)
+    private void PrepareBlur(WallpaperFrame capture, float radius)
     {
         var source = capture.Texture!;
         var size = source.Description;
@@ -259,7 +341,7 @@ internal sealed class LiquidGlassEngine : IDisposable
         return GlassPreview.CopyTexture(this, target);
     }
 
-    internal void Draw(WallpaperCapture capture, ID3D11RenderTargetView target, int width, int height, GlassParameters parameters)
+    internal void Draw(WallpaperFrame capture, ID3D11RenderTargetView target, int width, int height, GlassParameters parameters)
     {
         DrawPass(capture.Texture!, _blurBuffers[capture].Output, target, width, height, parameters, _pixel);
         // D3D9 and D3D11 have separate queues. Finish writes before WPF reads this shared surface.
@@ -302,8 +384,12 @@ internal sealed class LiquidGlassEngine : IDisposable
         if (_disposed) return;
         _disposed = true;
         if (_timer is not null) { _timer.Stop(); _timer.Tick -= Tick; }
+        _staticCancellation.Cancel();
+        _staticCancellation.Dispose();
         foreach (var capture in _captures) capture.Dispose();
         _captures.Clear();
+        foreach (var frame in _staticWallpapers.Values) frame.Dispose();
+        _staticWallpapers.Clear();
         foreach (var blur in _blurBuffers.Values) blur.Dispose();
         _blurBuffers.Clear();
         _completion?.Dispose(); _sampler?.Dispose(); _constants?.Dispose(); _blurPixel?.Dispose(); _pixel?.Dispose(); _vertex?.Dispose();

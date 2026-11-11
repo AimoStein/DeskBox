@@ -6,14 +6,14 @@ using System.Windows.Media.Imaging;
 using DeskBox.Models;
 using DeskBox.Services;
 using DeskBox.Views;
-using Vortice.Direct3D11;
+using Drawing = System.Drawing;
 
 namespace DeskBox.Rendering;
 
 /// <summary>Exercises settings events, real item bindings and GPU pixels against a fixed pattern.</summary>
 internal static class AppearanceTest
 {
-    internal static unsafe void Run(LiquidGlassEngine engine, BoxWindow[] windows, AppConfig config,
+    internal static void Run(LiquidGlassEngine engine, BoxWindow[] windows, AppConfig config,
         string output, Action<string, bool> check)
     {
         var original = (config.BoxOpacity, config.IconSize, config.CornerRadius, config.GlassBlur, config.GlassRefraction);
@@ -47,28 +47,36 @@ internal static class AppearanceTest
         windows[1].Config.ListView = false;
 
         const int width = 256, height = 192;
-        var pixels = new byte[width * height * 4];
-        for (var y = 0; y < height; y++)
-            for (var x = 0; x < width; x++)
-            {
-                var index = (y * width + x) * 4;
-                var stripe = ((x / 8 + y / 8) % 2) == 0;
-                pixels[index] = stripe ? (byte)230 : (byte)45;
-                pixels[index + 1] = stripe ? (byte)180 : (byte)65;
-                pixels[index + 2] = stripe ? (byte)40 : (byte)210;
-                pixels[index + 3] = 255;
-            }
-        var description = new Texture2DDescription
+        var wallpaper = Path.Combine(output, "static-wallpaper-fixture.png");
+        using (var image = new Drawing.Bitmap(width, height))
         {
-            Width = width, Height = height, MipLevels = 1, ArraySize = 1,
-            Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
-            SampleDescription = new Vortice.DXGI.SampleDescription(1, 0), BindFlags = BindFlags.ShaderResource
-        };
-        ID3D11Texture2D texture;
-        fixed (byte* data = pixels)
-            texture = engine.Device.CreateTexture2D(description, new SubresourceData(data, width * 4));
-        using (texture)
+            using var graphics = Drawing.Graphics.FromImage(image);
+            using var first = new Drawing.SolidBrush(Drawing.Color.FromArgb(40, 180, 230));
+            using var second = new Drawing.SolidBrush(Drawing.Color.FromArgb(210, 65, 45));
+            for (var y = 0; y < height; y += 8)
+                for (var x = 0; x < width; x += 8)
+                    graphics.FillRectangle(((x / 8 + y / 8) % 2) == 0 ? first : second, x, y, 8, 8);
+            image.Save(wallpaper, Drawing.Imaging.ImageFormat.Png);
+        }
+        var bounds = new Drawing.Rectangle(0, 0, width, height);
+        var monitor = new StaticWallpaper.Monitor(bounds, bounds, wallpaper, File.GetLastWriteTimeUtc(wallpaper),
+            StaticWallpaper.Position.Stretch, 0);
+        var fitBounds = new Drawing.Rectangle(0, 0, width, width);
+        var fit = StaticWallpaper.Render(monitor with
         {
+            Bounds = fitBounds, Desktop = fitBounds, Position = StaticWallpaper.Position.Fit,
+        });
+        check("静态壁纸适应布局保留上下留白", fit.Data[10 * width * 4] == 0 && fit.Data[(36 * width + 4) * 4] == 230);
+        var leftBounds = new Drawing.Rectangle(-120, 0, 120, height);
+        var rightBounds = new Drawing.Rectangle(0, 0, 136, height);
+        var desktop = Drawing.Rectangle.Union(leftBounds, rightBounds);
+        var left = StaticWallpaper.Render(monitor with { Bounds = leftBounds, Desktop = desktop, Position = StaticWallpaper.Position.Span });
+        var right = StaticWallpaper.Render(monitor with { Bounds = rightBounds, Desktop = desktop, Position = StaticWallpaper.Position.Span });
+        check("静态壁纸跨屏布局按各屏坐标裁切", left.Data[(4 * left.Width + 4) * 4] == 230 &&
+            right.Data[(4 * right.Width + 4) * 4] == 45);
+        using (var wallpaperFrame = StaticWallpaper.Render(monitor).Upload(engine.Device, bounds))
+        {
+            var texture = wallpaperFrame.Texture!;
             BitmapSource Sample(string name)
             {
                 var image = engine.RenderSample(texture, width, height, engine.Surfaces[0].GetParameters());
@@ -100,7 +108,7 @@ internal static class AppearanceTest
             var flat = Sample("refraction-0");
             Set("SlGlassRefraction", 28);
             var refracted = Sample("refraction-28");
-            check("玻璃折射滑块改变边缘实际 GPU 像素", Difference(flat, refracted, true) > 10);
+            check("玻璃折射滑块改变静态壁纸的边缘 GPU 像素", Difference(flat, refracted, true) > 10);
             check("折射限制在窄边缘内，中心纹理不被扭曲", InteriorDifference(flat, refracted,
                 (int)Math.Ceiling(engine.Surfaces[0].GetParameters().Shape.W)) == 0);
             Set("SlGlassRefraction", 80);

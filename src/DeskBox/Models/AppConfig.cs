@@ -57,6 +57,10 @@ public sealed class GroupEntry
     public string Path { get; set; } = "";
     /// <summary>仅 Shell 命名空间项需要保存显示名，文件名始终跟随原文件。</summary>
     public string DisplayName { get; set; } = "";
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ShortcutIdentity { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ShortcutUpgradeIdentity { get; set; }
 }
 
 public sealed class AppConfig
@@ -95,6 +99,7 @@ public sealed class AppConfig
     public bool FirstRun { get; set; } = true;
 
     public List<BoxConfig> Boxes { get; set; } = new();
+    public Dictionary<string, string> ShortcutAliases { get; set; } = new();
     public List<MoveRecord> LastOrganize { get; set; } = new();
     public string LastOrganizeTime { get; set; } = "";
 
@@ -251,6 +256,7 @@ public static class ConfigStore
     private static void Normalize(AppConfig cfg)
     {
         cfg.Boxes ??= new List<BoxConfig>();
+        cfg.ShortcutAliases = new Dictionary<string, string>(cfg.ShortcutAliases ?? new(), StringComparer.Ordinal);
         cfg.LastOrganize ??= new List<MoveRecord>();
 
         if (string.IsNullOrWhiteSpace(cfg.BoxRoot))

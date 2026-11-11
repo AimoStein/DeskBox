@@ -17,7 +17,7 @@ public sealed class BoxItem : INotifyPropertyChanged
     public BoxItem(string path, int iconSize, BitmapSource? initialIcon = null, string? displayName = null)
     {
         Path = path;
-        Name = Services.VirtualGroups.IsShell(path) && !string.IsNullOrWhiteSpace(displayName) ? displayName : DisplayName(path);
+        Name = !string.IsNullOrWhiteSpace(displayName) ? displayName : DisplayName(path);
 
         IsDirectory = Directory.Exists(path);
         RefreshFileState(iconSize);

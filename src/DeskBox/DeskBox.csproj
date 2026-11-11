@@ -9,6 +9,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
+    <StartupObject>DeskBox.Program</StartupObject>
     <LangVersion>latest</LangVersion>
     <AssemblyName>DeskBox</AssemblyName>
     <RootNamespace>DeskBox</RootNamespace>

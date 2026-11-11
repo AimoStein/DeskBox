@@ -70,10 +70,19 @@ public static class VirtualGroups
         foreach (var entry in entries)
         {
             var path = Key(entry.Path);
+            var existing = config.Boxes.Where(box => box.IsVirtual)
+                .SelectMany(box => box.Entries)
+                .FirstOrDefault(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase));
             foreach (var other in config.Boxes.Where(box => box.IsVirtual && box != target))
                 Remove(other, new[] { path });
             if (target.Entries.Any(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase))) continue;
-            target.Entries.Add(new GroupEntry { Path = path, DisplayName = entry.DisplayName });
+            target.Entries.Add(new GroupEntry
+            {
+                Path = path,
+                DisplayName = entry.DisplayName,
+                ShortcutIdentity = entry.ShortcutIdentity ?? existing?.ShortcutIdentity,
+                ShortcutUpgradeIdentity = entry.ShortcutUpgradeIdentity ?? existing?.ShortcutUpgradeIdentity,
+            });
             target.ItemOrder.Add(path);
             changed++;
         }

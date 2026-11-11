@@ -54,7 +54,7 @@ internal sealed class GlassSurface : IDisposable
         AvailabilityChanged(value);
     }
 
-    internal bool Render(WallpaperCapture capture)
+    internal bool Render(WallpaperFrame capture)
     {
         var bounds = GetBounds();
         var width = Math.Clamp((int)Math.Ceiling(bounds.Width), 1, 8192);

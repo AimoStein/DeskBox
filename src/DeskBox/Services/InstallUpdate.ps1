@@ -15,6 +15,7 @@ $restart = New-Object Diagnostics.ProcessStartInfo
 $restart.FileName = $Target
 $restart.WorkingDirectory = $targetDirectory
 $restart.UseShellExecute = $false
+$restart.Arguments = '--startup'
 function Get-Sha256([string]$path) {
     $stream = [IO.File]::OpenRead($path)
     $algorithm = [Security.Cryptography.SHA256]::Create()

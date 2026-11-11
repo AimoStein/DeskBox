@@ -106,6 +106,7 @@ public static class NativeMethods
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
 
     /// <summary>GetWindow 命令：z 序里紧挨在上面的那个窗口。</summary>
@@ -145,6 +146,12 @@ public static class NativeMethods
     private static extern short GetAsyncKeyState(int vKey);
 
     internal static bool IsLeftMouseButtonDown() => (GetAsyncKeyState(0x01) & 0x8000) != 0;
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    internal static extern bool ShowWindowAsync(IntPtr hwnd, int command);
 
     [DllImport("shell32.dll", EntryPoint = "SHChangeNotify")]
     internal static extern void SHChangeNotifyIdList(uint eventId, uint flags, IntPtr item1, IntPtr item2);

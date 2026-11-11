@@ -36,10 +36,10 @@ internal static class GlassPreview
         grid.Children.Add(glass);
         var content = new StackPanel { Margin = new Thickness(25, 20, 25, 20) };
         content.Children.Add(new TextBlock { Text = "Liquid Glass", FontSize = 21, FontWeight = FontWeights.SemiBold, Foreground = Brushes.Black });
-        content.Children.Add(new TextBlock { Text = "Wallpaper Engine · 实时玻璃", Margin = new Thickness(0, 6, 0, 22), Foreground = Brushes.Black, Opacity = 0.75 });
+        content.Children.Add(new TextBlock { Text = "壁纸 · 玻璃折射", Margin = new Thickness(0, 6, 0, 22), Foreground = Brushes.Black, Opacity = 0.75 });
         foreach (var text in new[] { "📁  项目文件", "📄  工作文档", "🖼  图片素材" })
             content.Children.Add(new TextBlock { Text = text, FontSize = 17, Margin = new Thickness(0, 0, 0, 22), Foreground = Brushes.Black });
-        var status = new TextBlock { Text = "正在连接动态壁纸…", FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = Brushes.Black, Opacity = 0.75 };
+        var status = new TextBlock { Text = "正在读取桌面壁纸…", FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = Brushes.Black, Opacity = 0.75 };
         content.Children.Add(status);
         grid.Children.Add(content);
         window.Content = grid;
@@ -55,13 +55,16 @@ internal static class GlassPreview
             count++;
             var engine = LiquidGlassEngine.Current;
             var frames = engine?.Captures.Sum(c => c.Frames) ?? 0;
-            status.Text = frames > 0 ? $"实时捕获 {frames} 帧 · 按 Esc 关闭" : "未取得视频画面，使用普通背景";
-            samples.Add($"second={count}, frames={frames}, tickMs={engine?.LastTickMilliseconds:F2}, captures={engine?.Captures.Count}, {engine?.SurfaceStatus}");
+            var staticCount = engine?.StaticWallpapers.Count() ?? 0;
+            status.Text = frames > 0 ? $"实时捕获 {frames} 帧 · 按 Esc 关闭"
+                : staticCount > 0 ? "静态壁纸折射 · 按 Esc 关闭" : "未取得壁纸画面，使用普通背景";
+            samples.Add($"second={count}, frames={frames}, tickMs={engine?.LastTickMilliseconds:F2}, captures={engine?.Captures.Count}, static={staticCount}, {engine?.SurfaceStatus}");
             if (output is not null && (count == 3 || count == 6) && engine is not null)
             {
                 Directory.CreateDirectory(output);
-                var capture = engine.Captures.FirstOrDefault(c => c.Texture is not null);
-                if (capture?.Texture is not null) SaveTexture(engine, capture.Texture, Path.Combine(output, $"wallpaper-{count}.png"));
+                WallpaperFrame? frame = engine.Captures.FirstOrDefault(c => c.Texture is not null);
+                frame ??= engine.StaticWallpapers.FirstOrDefault();
+                if (frame?.Texture is not null) SaveTexture(engine, frame.Texture, Path.Combine(output, $"wallpaper-{count}.png"));
                 engine.SaveSurface(Path.Combine(output, $"glass-{count}.png"));
             }
             if (output is not null && count >= 8)

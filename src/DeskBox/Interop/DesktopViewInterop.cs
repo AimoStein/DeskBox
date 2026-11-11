@@ -5,7 +5,11 @@ namespace DeskBox.Interop;
 /// <summary>通过 ShellWindows 获取 Explorer 正在显示的桌面视图，而不是创建另一个文件夹视图。</summary>
 internal static class DesktopViewInterop
 {
-    internal static IReadOnlyList<string>? ReadItems() => VisitItems(null);
+    internal sealed record Item(string Path, string Name, int? X = null, int? Y = null, long Revision = 0);
+
+    internal static IReadOnlyList<string>? ReadItems() => ReadLayout()?.Select(item => item.Path).ToList();
+
+    internal static IReadOnlyList<Item>? ReadLayout() => VisitItems(null);
 
     internal static void RefreshForDiagnostics() => VisitItems(null, refresh: true);
 
@@ -25,7 +29,7 @@ internal static class DesktopViewInterop
         finally { foreach (var pidl in targets) ShellItemInterop.FreePidl(pidl); }
     }
 
-    private static IReadOnlyList<string>? VisitItems(Action<IntPtr, string>? inspect, bool refresh = false)
+    private static IReadOnlyList<Item>? VisitItems(Action<IntPtr, string>? inspect, bool refresh = false)
     {
         object? windows = null;
         object? desktop = null;
@@ -46,19 +50,25 @@ internal static class DesktopViewInterop
             if (refresh) { view.Refresh(); return null; }
             if (view is IFolderView folder && folder.ItemCount(2, out var count) >= 0)
             {
-                var names = new List<string>();
+                var items = new List<Item>();
+                var list = NativeMethods.FindWindowEx(NativeMethods.FindDesktopDefView(), IntPtr.Zero, "SysListView32", null);
                 for (var index = 0; index < count; index++)
                 {
                     if (folder.Item(index, out var pidl) < 0 || pidl == IntPtr.Zero) continue;
                     try
                     {
-                        var name = ShellItemInterop.GetName(pidl, ShellItemInterop.SIGDN.DESKTOPABSOLUTEPARSING) ?? "?";
-                        names.Add(name);
-                        inspect?.Invoke(pidl, name);
+                        var path = ShellItemInterop.GetName(pidl, ShellItemInterop.SIGDN.FILESYSPATH)
+                            ?? ShellItemInterop.GetName(pidl, ShellItemInterop.SIGDN.DESKTOPABSOLUTEPARSING);
+                        if (path is null) continue;
+                        var label = ShellItemInterop.GetName(pidl, ShellItemInterop.SIGDN.NORMALDISPLAY) ?? path;
+                        var positioned = folder.GetItemPosition(pidl, out var point) >= 0 &&
+                            list != IntPtr.Zero && ClientToScreen(list, ref point);
+                        items.Add(new Item(path, label, positioned ? point.X : null, positioned ? point.Y : null));
+                        inspect?.Invoke(pidl, path);
                     }
                     finally { Marshal.FreeCoTaskMem(pidl); }
                 }
-                return names;
+                return items;
             }
             return null;
         }
@@ -76,6 +86,9 @@ internal static class DesktopViewInterop
         }
     }
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
     [ComImport, Guid("6D5140C1-7436-11CE-8034-00AA006009FA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IServiceProvider
     {
@@ -119,5 +132,13 @@ internal static class DesktopViewInterop
         [PreserveSig] int GetFolder(ref Guid iid, out IntPtr folder);
         [PreserveSig] int Item(int index, out IntPtr pidl);
         [PreserveSig] int ItemCount(uint flags, out int count);
+        [PreserveSig]
+        int Items(uint flags, ref Guid iid, out IntPtr items);
+        [PreserveSig]
+        int GetSelectionMarkedItem(out int item);
+        [PreserveSig]
+        int GetFocusedItem(out int item);
+        [PreserveSig]
+        int GetItemPosition(IntPtr pidl, out POINT point);
     }
 }

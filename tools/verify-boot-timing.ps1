@@ -15,7 +15,7 @@ Write-Output '===== 2. 登录自启现场 ====='
 
 if (-not $LogPath) {
     $candidates = @(
-        $processes | Where-Object ProcessName -eq 'DeskBox' | ForEach-Object { Join-Path (Split-Path $_.Path -Parent) 'deskbox.log' }
+        $processes | Where-Object { $_.ProcessName -eq 'DeskBox' -and $_.Path } | ForEach-Object { Join-Path (Split-Path $_.Path -Parent) 'deskbox.log' }
         Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\deskbox.log'
         Join-Path $env:APPDATA 'DeskBox\deskbox.log'
     )
@@ -55,6 +55,10 @@ foreach ($line in $block) {
     if ($line -match '配置读取（盒子 (\d+) 个）') { $expected = [int]$matches[1]; break }
 }
 Write-Output '===== 4. 本进程显示耗时（不能单独视为登录或冷启动耗时） ====='
+foreach ($line in $block) {
+    if ($line -match '快照图标首帧自进程启动 (\d+)ms') { Write-Output "可点击快照首帧: $($matches[1])ms" }
+    if ($line -match '桌面与盒子完成显示交接，自进程启动 (\d+)ms') { Write-Output "完整界面接管: $($matches[1])ms" }
+}
 if ($frames.Count -gt 0) {
     $range = $frames | Measure-Object Milliseconds -Minimum -Maximum
     Write-Output "首个盒子首帧: $($range.Minimum)ms；最后一个已记录盒子首帧: $($range.Maximum)ms"

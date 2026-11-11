@@ -372,7 +372,7 @@
                                             <TextBlock Text="实时玻璃背景" Style="{StaticResource RowLabel}" />
                                             <CheckBox x:Name="ChkGlass" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="实时玻璃背景" />
                                         </Grid>
-                                        <TextBlock Text="跟随 Wallpaper Engine 视频壁纸，呈现折射与光泽。" Style="{StaticResource Caption}" Margin="0,0,0,19" />
+                                        <TextBlock Text="为静态壁纸和可捕获的动态壁纸呈现折射与光泽。" Style="{StaticResource Caption}" Margin="0,0,0,19" />
                                         <Grid Margin="0,0,0,16">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="77" />

@@ -1,9 +1,10 @@
 using System.Runtime.InteropServices;
-using System.Text;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX.Direct3D11;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
+using DeskBox.Interop;
+using WinForms = System.Windows.Forms;
 
 namespace DeskBox.Rendering;
 
@@ -29,29 +30,47 @@ internal static class GlassInterop
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc callback, nint state);
     [DllImport("user32.dll")] internal static extern bool EnumChildWindows(nint window, EnumProc callback, nint state);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(nint window);
-    [DllImport("user32.dll")] internal static extern bool IsWindow(nint window);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    internal static extern int GetClassName(nint window, StringBuilder name, int length);
     [DllImport("user32.dll")] internal static extern bool GetWindowRect(nint window, out Interop.RECT rect);
     [DllImport("user32.dll")] internal static extern nint GetAncestor(nint window, uint flags);
     [DllImport("user32.dll")] internal static extern nint GetDesktopWindow();
+    [DllImport("user32.dll")] private static extern nint GetShellWindow();
 
     internal static IReadOnlyList<nint> FindWallpaperWindows()
     {
+        var shellWindow = GetShellWindow();
+        if (shellWindow == 0 || NativeMethods.GetWindowThreadProcessId(shellWindow, out var shellPid) == 0)
+            return Array.Empty<nint>();
+
+        var screens = WinForms.Screen.AllScreens.Select(screen => screen.Bounds).ToArray();
         var result = new List<nint>();
-        void Inspect(nint window)
+        EnumWindows((root, _) =>
         {
-            var name = new StringBuilder(256);
-            GetClassName(window, name, name.Capacity);
-            if (IsWindowVisible(window) && name.ToString().StartsWith("WPE", StringComparison.Ordinal)
-                && name.ToString().Contains("Wallpaper", StringComparison.Ordinal) && !result.Contains(window))
-                result.Add(window);
-        }
-        EnumProc child = (window, _) => { Inspect(window); return true; };
-        EnumProc top = (window, _) => { Inspect(window); EnumChildWindows(window, child, 0); return true; };
-        EnumWindows(top, 0);
+            if (!IsDesktopHost(root, shellPid) || !IsWindowVisible(root)) return true;
+            EnumChildWindows(root, (window, _) =>
+            {
+                // Wallpaper providers embed their renderer under the shell's desktop host.
+                // The shell's own icon view and ordinary application windows are outside this branch.
+                if (!IsWindowVisible(window) ||
+                    NativeMethods.GetWindowThreadProcessId(window, out var pid) == 0 || pid == shellPid ||
+                    !IsDesktopHost(GetAncestor(window, 1), shellPid) ||
+                    !GetWindowRect(window, out var bounds)) return true;
+
+                var rect = System.Drawing.Rectangle.FromLTRB(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
+                if (screens.Any(screen =>
+                {
+                    var overlap = System.Drawing.Rectangle.Intersect(screen, rect);
+                    return overlap.Width >= screen.Width * 0.85 && overlap.Height >= screen.Height * 0.85;
+                })) result.Add(window);
+                return true;
+            }, 0);
+            return true;
+        }, 0);
         return result;
     }
+
+    private static bool IsDesktopHost(nint window, uint shellPid) =>
+        window != 0 && NativeMethods.GetWindowThreadProcessId(window, out var pid) != 0 && pid == shellPid &&
+        NativeMethods.ClassNameOf(window) is "Progman" or "WorkerW";
 
     internal static GraphicsCaptureItem CreateItem(nint window)
     {
