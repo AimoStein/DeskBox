@@ -32,13 +32,15 @@ public partial class SettingsWindow : Window
             Grid.SetColumnSpan(IconSizeCard, 3);
             BoxOpacityRow.Visibility = Visibility.Collapsed;
             BoxRadiusRow.Visibility = Visibility.Collapsed;
-            GlassBlurRow.Visibility = Visibility.Collapsed;
+            LegacyGlassCard.Visibility = Visibility.Collapsed;
+            LauncherColorCard.Visibility = Visibility.Visible;
+            LauncherWinKeyRow.Visibility = Visibility.Visible;
+            LauncherStartButtonRow.Visibility = Visibility.Visible;
             BoxIconHint.Visibility = Visibility.Collapsed;
             ThemeLabel.Text = "设置主题";
             IconCardTitle.Text = "面板图标";
             HiddenHint.Text = "在面板中显示带隐藏属性的桌面项目。";
-            AppearanceHint.Text = "在开始面板右上角的菜单中更换背景。";
-            GlassHint.Text = "对开始面板里的图片或视频背景呈现折射。";
+            AppearanceHint.Visibility = Visibility.Collapsed;
         }
 
         Loaded += (_, _) =>
@@ -59,6 +61,36 @@ public partial class SettingsWindow : Window
         LoadValues();
     }
 
+    internal void DockToLauncher(Window launcher)
+    {
+        Owner = launcher;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        ShowInTaskbar = false;
+        // The standalone settings use two cards per row. Stack those cards
+        // in the sidebar so the sliders have room at the narrower width.
+        foreach (var page in Pages.Children.OfType<Grid>())
+        {
+            page.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            page.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            foreach (FrameworkElement card in page.Children)
+            {
+                var secondCard = Grid.GetColumn(card) == 2;
+                Grid.SetColumn(card, 0);
+                Grid.SetColumnSpan(card, page.ColumnDefinitions.Count);
+                Grid.SetRow(card, secondCard ? 1 : 0);
+                if (secondCard) card.Margin = new Thickness(0, 12, 0, 0);
+            }
+        }
+        NavAppearance.IsChecked = true;
+        SelectSection("appearance");
+        PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Escape) return;
+            e.Handled = true;
+            Close();
+        };
+    }
+
     /// <summary>被前台锁挡住时也要能出现在用户面前。</summary>
     public void BringToFront()
     {
@@ -68,8 +100,11 @@ public partial class SettingsWindow : Window
         }
 
         Activate();
-        Topmost = true;
-        Topmost = false;
+        if (Owner is null)
+        {
+            Topmost = true;
+            Topmost = false;
+        }
         Activate();
 
         var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
@@ -86,6 +121,8 @@ public partial class SettingsWindow : Window
         {
             ChkAutoStart.IsChecked = AutoStart.IsEnabled;
             ChkAutoCheckUpdates.IsChecked = _config.AutoCheckForUpdates;
+            ChkLauncherWinKey.IsChecked = _config.LauncherInterceptWinKey;
+            ChkLauncherStartButton.IsChecked = _config.LauncherInterceptStartButton;
             ChkDoubleClick.IsChecked = _config.HideIconsOnDoubleClick;
             ChkHideGroups.IsChecked = _config.HideBoxesWithIcons;
             ChkHideTaskbar.IsChecked = _config.HideTaskbarWithIcons;
@@ -111,6 +148,10 @@ public partial class SettingsWindow : Window
             LblOpacity.Text = $"{SlOpacity.Value:0}%";
             LblIcon.Text = $"{SlIcon.Value:0} px";
             LblRadius.Text = $"{SlRadius.Value:0} px";
+            SlBackgroundBrightness.Value = _config.LauncherBackgroundBrightness;
+            SlBackgroundHue.Value = _config.LauncherBackgroundHue;
+            SlBackgroundSaturation.Value = _config.LauncherBackgroundSaturation;
+            UpdateBackgroundColorLabels();
 
             var version = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
             LblVersion.Text = $"版本 {version.ToString(3)}";
@@ -153,7 +194,7 @@ public partial class SettingsWindow : Window
 
     private void Header_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ButtonState == MouseButtonState.Pressed)
+        if (Owner is null && e.ButtonState == MouseButtonState.Pressed)
         {
             try
             {
@@ -178,6 +219,11 @@ public partial class SettingsWindow : Window
         _config.HideIconsOnDoubleClick = ChkDoubleClick.IsChecked == true;
         _config.HideBoxesWithIcons = ChkHideGroups.IsChecked == true;
         _config.AutoCheckForUpdates = ChkAutoCheckUpdates.IsChecked == true;
+        if (_launcherMode)
+        {
+            _config.LauncherInterceptWinKey = ChkLauncherWinKey.IsChecked == true;
+            _config.LauncherInterceptStartButton = ChkLauncherStartButton.IsChecked == true;
+        }
         _config.HideTaskbarWithIcons = ChkHideTaskbar.IsChecked == true;
         _config.RestoreIconsOnExit = ChkRestoreIcons.IsChecked == true;
         _config.ShowHiddenFiles = ChkHidden.IsChecked == true;
@@ -248,6 +294,23 @@ public partial class SettingsWindow : Window
         Applied?.Invoke(this, EventArgs.Empty);
     }
 
+    private void BackgroundColor_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_loading) return;
+        _config.LauncherBackgroundBrightness = (int)Math.Round(SlBackgroundBrightness.Value);
+        _config.LauncherBackgroundHue = (int)Math.Round(SlBackgroundHue.Value);
+        _config.LauncherBackgroundSaturation = (int)Math.Round(SlBackgroundSaturation.Value);
+        UpdateBackgroundColorLabels();
+        Applied?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdateBackgroundColorLabels()
+    {
+        LblBackgroundBrightness.Text = $"{SlBackgroundBrightness.Value:0}%";
+        LblBackgroundHue.Text = $"{SlBackgroundHue.Value:0}°";
+        LblBackgroundSaturation.Text = $"{SlBackgroundSaturation.Value:0}%";
+    }
+
     private void Organize_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("organize");
 
     private void Arrange_Click(object sender, RoutedEventArgs e) => CommandRequested?.Invoke("arrange");
@@ -283,7 +346,7 @@ public partial class SettingsWindow : Window
             page.Visibility = Equals(page.Tag, section) ? Visibility.Visible : Visibility.Collapsed;
         (PageTitle.Text, PageSubtitle.Text) = section switch
         {
-            "appearance" => ("外观", _launcherMode ? "调整面板玻璃效果与设置主题。" : "调整盒子背景、玻璃效果与主题。"),
+            "appearance" => ("外观", _launcherMode ? "调整面板背景颜色和设置主题。" : "调整盒子背景、玻璃效果与主题。"),
             "layout" => ("盒子排布", "让桌面上的盒子对齐、有序，保持恰好的间距。"),
             "organize" => ("整理", "按类型归类桌面文件，也可以随时撤销上次整理。"),
             "general" => ("常规", "管理启动方式与本地数据。"),

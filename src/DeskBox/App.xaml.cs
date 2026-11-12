@@ -1803,7 +1803,7 @@ public partial class App : Application
         menu.IsOpen = true;
     }
 
-    private void ShowSettings()
+    private void ShowSettings(LauncherWindow? launcher = null)
     {
         if (_settings is null)
         {
@@ -1817,6 +1817,7 @@ public partial class App : Application
             _settings.Closed += (_, _) => _settings = null;
         }
 
+        launcher?.DockSettings(_settings);
         if (!_settings.IsVisible)
         {
             _settings.Show();
@@ -1930,7 +1931,7 @@ public partial class App : Application
 
         if (_mouseWatcher is not null)
         {
-            _mouseWatcher.Enabled = _config.HideIconsOnDoubleClick;
+            _mouseWatcher.Enabled = _launcherMode || _config.HideIconsOnDoubleClick;
         }
 
         var hiddenFilesChanged = _config.ShowHiddenFiles != _lastShowHiddenFiles;
@@ -1940,7 +1941,11 @@ public partial class App : Application
             if (_launcherMode) RequestLauncherScan();
             else RequestDesktopScan();
         }
-        if (_launcherMode) _launcher?.RefreshAppearance();
+        if (_launcherMode)
+        {
+            RefreshLauncherInput();
+            _launcher?.RefreshAppearance();
+        }
 
         foreach (var box in _boxes)
         {

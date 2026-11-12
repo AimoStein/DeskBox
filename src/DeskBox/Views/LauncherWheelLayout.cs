@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Media.Media3D;
 
 namespace DeskBox.Views;
 
@@ -15,7 +14,7 @@ internal static class LauncherWheelLayout
     private const double CompactVerticalReserve = CompactIconInset * 2 + CompactLabelGap + CompactLabelHeight + 1;
     private const double ExtraTileHeight = 6;
 
-    internal sealed record Sector(double Span, Geometry Shape, Geometry Outline, Point3D[] Edges, Rect Title, IReadOnlyList<Point> Slots);
+    internal sealed record Sector(double Span, Geometry Shape, Geometry Outline, Rect Title, IReadOnlyList<Point> Slots);
     internal sealed record Layout(Point Center, double Radius, double FadeStart, double HubRadius, double Pitch,
         Size TileSize, double IconAnchor, IReadOnlyList<Sector> Sectors);
 
@@ -73,14 +72,10 @@ internal static class LauncherWheelLayout
             {
                 var (start, span, direction, titleSize) = division;
                 var (shape, outline) = BuildSector(center, outer, inner, start, span);
-                var gap = SectorHalfGap(inner, span);
-                var edges = span >= Math.Tau - 0.001
-                    ? new[] { new Point3D(0, 0, 10000), new Point3D(0, 0, 10000) }
-                    : new[] { Edge(center, start, 1, gap), Edge(center, start + span, -1, gap) };
                 var support = Math.Abs(direction.X) * titleSize.Width / 2 + Math.Abs(direction.Y) * titleSize.Height / 2;
                 var titleCenter = center + direction * (outer + support + 8);
                 var title = new Rect(titleCenter - new Vector(titleSize.Width / 2, titleSize.Height / 2), titleSize);
-                return new Sector(span, shape, outline, edges, title, slots[i]);
+                return new Sector(span, shape, outline, title, slots[i]);
             }).ToArray();
             return new Layout(center, outer, fadeStart, hub, pitch, tile, iconAnchor, sectors);
         }
@@ -163,13 +158,6 @@ internal static class LauncherWheelLayout
         geometry.Freeze();
         outline.Freeze();
         return (geometry, outline);
-    }
-
-    private static Point3D Edge(Point center, double angle, int side, double halfGap)
-    {
-        var nx = -Math.Sin(angle) * side;
-        var ny = Math.Cos(angle) * side;
-        return new Point3D(nx, ny, -nx * center.X - ny * center.Y - halfGap);
     }
 
     private static IReadOnlyList<Point> SpokeSlots(Point center, IReadOnlyList<double> rings, double inner, double start,

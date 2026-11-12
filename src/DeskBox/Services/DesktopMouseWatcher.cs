@@ -12,7 +12,9 @@ public sealed class DesktopMouseWatcher : IDisposable
 
     private readonly NativeMethods.LowLevelMouseProc _callback;
     private readonly bool _iconsSuppressed;
+    private readonly TaskbarStartButtons _startButtons = new();
     private IntPtr _hook = IntPtr.Zero;
+    private IntPtr _pressedStartButton;
     private uint _lastClickTime;
     private POINT _lastClickPoint;
 
@@ -23,8 +25,13 @@ public sealed class DesktopMouseWatcher : IDisposable
     }
 
     public event EventHandler? EmptyDesktopDoubleClicked;
+    internal event Action<POINT>? TaskbarStartClicked;
 
     public bool Enabled { get; set; } = true;
+    internal bool RedirectTaskbarStart { get; set; }
+
+    internal Task RefreshStartButtonsAsync() =>
+        RedirectTaskbarStart ? _startButtons.RefreshAsync() : Task.CompletedTask;
 
     public void Start()
     {
@@ -41,7 +48,7 @@ public sealed class DesktopMouseWatcher : IDisposable
 
         if (_hook == IntPtr.Zero)
         {
-            Log.Warn("安装鼠标钩子失败，桌面双击操作将不可用。");
+            Log.Warn("安装鼠标钩子失败，桌面双击和开始按钮接管将不可用。");
         }
     }
 
@@ -49,10 +56,28 @@ public sealed class DesktopMouseWatcher : IDisposable
     {
         try
         {
+            if (nCode >= 0 && wParam == (IntPtr)NativeMethods.WM_LBUTTONUP && _pressedStartButton != IntPtr.Zero)
+            {
+                var pressed = _pressedStartButton;
+                _pressedStartButton = IntPtr.Zero;
+                var point = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam).pt;
+                if (RedirectTaskbarStart && _startButtons.Hit(point, NativeMethods.WindowFromPoint(point)) == pressed)
+                    TaskbarStartClicked?.Invoke(point);
+                return new IntPtr(1);
+            }
             if (nCode >= 0 && Enabled && wParam.ToInt32() == NativeMethods.WM_LBUTTONDOWN)
             {
                 var data = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
                 var window = NativeMethods.WindowFromPoint(data.pt);
+                if (RedirectTaskbarStart)
+                {
+                    _pressedStartButton = _startButtons.Hit(data.pt, window);
+                    if (_pressedStartButton != IntPtr.Zero)
+                    {
+                        _lastClickTime = 0;
+                        return new IntPtr(1);
+                    }
+                }
                 if (!IsDesktopSurface(window))
                 {
                     _lastClickTime = 0;

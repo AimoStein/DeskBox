@@ -1,9 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Windows.Media.Media3D;
 using ShapePath = System.Windows.Shapes.Path;
-using DeskBox.Rendering;
 using DeskBox.Services;
 
 namespace DeskBox.Views;
@@ -12,11 +10,10 @@ internal partial class LauncherWindow
 {
     private static readonly Brush RimBrush = MakeBrush(206, 125, 147, 164);
     private static readonly Brush PlateBrush = MakeBrush(250, 27, 36, 46);
-    private static readonly Brush MediaTint = MakeBrush(49, 15, 23, 32);
     private IReadOnlyList<LaunchSection> _wheelSections = Array.Empty<LaunchSection>();
     private IReadOnlyList<LaunchEntry> _dockEntries = Array.Empty<LaunchEntry>();
     private Size _wheelSize;
-    private (double Icon, bool CustomBackground, bool Glass, double Refraction) _wheelAppearance;
+    private double _wheelIconSize;
     private double _dockIconSize;
     private Canvas? _wheelFrame;
     private Grid? _searchHub;
@@ -28,8 +25,7 @@ internal partial class LauncherWindow
         var size = Overview.RenderSize;
         if (size.Width < 90 || size.Height < 90) return;
         var sections = _sections.Where(section => section.Group is not null).ToArray();
-        var appearance = (_config.IconSize, HasCustomBackground, _config.LiquidGlassEnabled, _config.GlassRefraction);
-        if (size == _wheelSize && appearance == _wheelAppearance && SameSections(_wheelSections, sections)) return;
+        if (size == _wheelSize && _config.IconSize == _wheelIconSize && SameSections(_wheelSections, sections)) return;
         var titles = sections.Select(BuildSectorTitle).ToArray();
         foreach (var title in titles) title.Measure(new Size(120, 26));
         var pitch = Math.Clamp(_config.IconSize + 47, 80, 116);
@@ -55,7 +51,7 @@ internal partial class LauncherWindow
         Overview.Children.Add(frame);
         _wheelFrame = frame;
         _wheelSize = size;
-        _wheelAppearance = appearance;
+        _wheelIconSize = _config.IconSize;
         _wheelSections = sections;
     }
 
@@ -101,16 +97,7 @@ internal partial class LauncherWindow
             IsHitTestVisible = false,
         };
         area.Children.Add(surface);
-        LauncherGlass? effect = null;
-        if (UseMediaGlass)
-        {
-            var localEdges = sector.Edges.Select(edge => new Point3D(edge.X, edge.Y,
-                edge.Z + edge.X * offset.X + edge.Y * offset.Y)).ToArray();
-            effect = LauncherGlass.CreateSector(localEdges, new Point3D(localCenter.X, localCenter.Y, layout.HubRadius + 9));
-        }
-        AddGlass(surface, effect, Overview, bounds);
-        if (HasCustomBackground && effect is null)
-            surface.Children.Add(new Border { Background = MediaTint, IsHitTestVisible = false });
+        AddBackground(surface, Overview, bounds);
         surface.Children.Add(Rim(Local(sector.Outline)));
 
         var content = new Canvas();

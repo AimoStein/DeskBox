@@ -31,8 +31,6 @@
     <PackageReference Include="Vortice.Direct3D9" Version="3.6.2" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.6.2" />
     <EmbeddedResource Include="Rendering\LiquidGlass.hlsl" />
-    <EmbeddedResource Include="Rendering\LauncherGlass.hlsl" />
-    <EmbeddedResource Include="Rendering\LauncherSectorGlass.hlsl" />
     <EmbeddedResource Include="Rendering\LauncherColor.hlsl" />
     <EmbeddedResource Include="Services\InstallUpdate.ps1" />
   </ItemGroup>

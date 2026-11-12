@@ -1,18 +1,40 @@
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Media3D;
+using DeskBox.Services;
+using Vortice.D3DCompiler;
 
 namespace DeskBox.Rendering;
 
 internal sealed class LauncherColor : ShaderEffect
 {
-    private static readonly Lazy<PixelShader?> Shader = new(() => LauncherGlass.LoadShader("LauncherColor"));
+    private static readonly Lazy<PixelShader?> Shader = new(LoadShader);
     private static readonly DependencyProperty InputProperty = RegisterPixelShaderSamplerProperty("Input", typeof(LauncherColor), 0);
     private static readonly DependencyProperty[] ChannelProperties = new[] { "Red", "Green", "Blue" }
         .Select((name, index) => DependencyProperty.Register(name, typeof(Point3D), typeof(LauncherColor),
             new UIPropertyMetadata(new Point3D(), PixelShaderConstantCallback(index)))).ToArray();
 
     internal static LauncherColor? Create() => Shader.Value is { } shader ? new LauncherColor(shader) : null;
+
+    private static PixelShader? LoadShader()
+    {
+        try
+        {
+            using var source = typeof(LauncherColor).Assembly.GetManifestResourceStream("DeskBox.Rendering.LauncherColor.hlsl")!;
+            using var reader = new StreamReader(source);
+            using var bytes = new MemoryStream(Compiler.Compile(reader.ReadToEnd(), "PS", "LauncherColor", "ps_2_0").ToArray());
+            var shader = new PixelShader();
+            shader.SetStreamSource(bytes);
+            shader.Freeze();
+            return shader;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"面板背景颜色不可用: {ex.Message}");
+            return null;
+        }
+    }
 
     private LauncherColor(PixelShader shader)
     {

@@ -2,12 +2,9 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 using DeskBox.Interop;
 using DeskBox.Models;
 using DeskBox.Rendering;
@@ -25,7 +22,7 @@ internal partial class LauncherWindow : Window
     private static readonly Brush CardBrush = MakeBrush(181, 27, 36, 46);
     private readonly AppConfig _config;
     private readonly bool _preview;
-    private readonly HashSet<LauncherGlassLayer> _glass = new();
+    private readonly HashSet<LauncherBackgroundLayer> _backgroundLayers = new();
     private IReadOnlyList<LaunchSection> _sections = Array.Empty<LaunchSection>();
     private LaunchEntry? _firstResult;
     private string? _selected;
@@ -34,10 +31,10 @@ internal partial class LauncherWindow : Window
     private bool _draggingEntries;
     private bool _sectionVisualsDirty;
     private bool _sectionRefreshQueued;
-    private string? _videoPath;
     private LauncherColor? _backgroundColor;
-    private bool HasCustomBackground => _videoPath is not null || Still.Source is not null;
-    private bool UseMediaGlass => HasCustomBackground && _config.LiquidGlassEnabled;
+    private SettingsWindow? _dockedSettings;
+
+    internal bool IsSessionActive => IsActive || _dockedSettings?.IsActive == true;
 
     internal event Action? ConfigChanged;
     internal event Action? UsageChanged;
@@ -65,9 +62,9 @@ internal partial class LauncherWindow : Window
             DockScroll.ScrollToHorizontalOffset(DockScroll.HorizontalOffset - e.Delta);
             e.Handled = true;
         };
-        AddGlass(DockPlate, null);
-        AddGlass(DetailPlate, null);
-        Options.Click += (_, _) => OpenOptions();
+        AddBackground(DockPlate);
+        AddBackground(DetailPlate);
+        SettingsButton.Click += (_, _) => SettingsRequested?.Invoke();
         AddGroup.Click += (_, _) => CreateGroup();
         PreviewKeyDown += OnKeyDown;
         PreviewTextInput += (_, e) =>
@@ -80,39 +77,18 @@ internal partial class LauncherWindow : Window
         };
         Deactivated += (_, _) => Dispatcher.BeginInvoke(() =>
         {
-            if (!preview && IsVisible && !IsActive && !_interacting && Options.ContextMenu?.IsOpen != true) Hide();
+            if (!preview && IsVisible && !IsActive && !_interacting && _dockedSettings is null) Hide();
         });
         IsVisibleChanged += (_, _) =>
         {
-            if (_videoPath is null) return;
-            if (IsVisible) Motion.Play();
-            else Motion.Pause();
+            if (!IsVisible) _dockedSettings?.Close();
         };
-        Motion.MediaOpened += (_, _) => Motion.Opacity = 1;
-        Motion.MediaEnded += (_, _) =>
-        {
-            Motion.Position = TimeSpan.Zero;
-            if (IsVisible) Motion.Play();
-        };
-        Motion.MediaFailed += (_, _) =>
-        {
-            if (_videoPath is null) return;
-            Log.Warn("面板视频背景无法播放: " + _videoPath);
-            UseDefaultBackground();
-            _config.LauncherBackground = "";
-            RefreshAppearance();
-            SaveChange();
-        };
-        LayoutUpdated += (_, _) => AlignGlass();
-        ItemsScroll.ScrollChanged += (_, _) => AlignGlass();
-        Closed += (_, _) => Motion.Close();
-        UseDefaultBackground();
-        if (!string.IsNullOrEmpty(config.LauncherBackground)) SetBackground(config.LauncherBackground);
-        ApplyBackgroundColor(config.LauncherBackgroundBrightness, config.LauncherBackgroundHue,
-            config.LauncherBackgroundSaturation);
+        LayoutUpdated += (_, _) => AlignBackgroundLayers();
+        ItemsScroll.ScrollChanged += (_, _) => AlignBackgroundLayers();
+        ApplyBackgroundColor();
     }
 
-    internal void Open()
+    internal void Open(POINT? anchor = null)
     {
         if (IsVisible)
         {
@@ -121,23 +97,85 @@ internal partial class LauncherWindow : Window
             return;
         }
         var foreground = NativeMethods.GetForegroundWindow();
-        var screen = foreground == IntPtr.Zero ? WinForms.Screen.FromPoint(WinForms.Cursor.Position) : WinForms.Screen.FromHandle(foreground);
-        var area = screen.WorkingArea;
-        var monitor = MonitorFromWindow(foreground, 2);
-        var scale = monitor != IntPtr.Zero && GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 ? dpi / 96.0 : 1;
-        var diameter = Math.Min(1480, Math.Min(area.Width * 0.97 / scale - 24, area.Height * 0.99 / scale - 108));
-        Width = diameter + 24;
-        Height = diameter + 108;
-        var width = (int)Math.Round(Width * scale);
-        var height = (int)Math.Round(Height * scale);
-        var handle = new WindowInteropHelper(this).EnsureHandle();
-        NativeMethods.SetWindowPos(handle, IntPtr.Zero, area.Left + (area.Width - width) / 2,
-            area.Top + (area.Height - height) / 2, width, height,
-            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER);
+        if (anchor is { } point)
+        {
+            var screen = WinForms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y));
+            PositionCentered(screen, DpiScale(MonitorFromPoint(point, 2)));
+        }
+        else
+        {
+            var screen = foreground == IntPtr.Zero
+                ? WinForms.Screen.FromPoint(WinForms.Cursor.Position) : WinForms.Screen.FromHandle(foreground);
+            PositionCentered(screen, MonitorScale(foreground));
+        }
         ShowSection(null);
+        Topmost = true;
         Show();
         Activate();
     }
+
+    internal void DockSettings(SettingsWindow settings)
+    {
+        if (_dockedSettings == settings) return;
+        _dockedSettings = settings;
+        settings.DockToLauncher(this);
+        settings.Closed += (_, _) =>
+        {
+            _dockedSettings = null;
+            if (!IsVisible) return;
+            var launcherHandle = new WindowInteropHelper(this).Handle;
+            if (launcherHandle == IntPtr.Zero) return;
+            PositionCentered(WinForms.Screen.FromHandle(launcherHandle), MonitorScale(launcherHandle));
+            Topmost = true;
+            Activate();
+        };
+
+        ShowSection(null);
+        var handle = new WindowInteropHelper(this).Handle;
+        var area = WinForms.Screen.FromHandle(handle).WorkingArea;
+        var scale = MonitorScale(handle);
+        var margin = (int)Math.Round(18 * scale);
+        var gap = (int)Math.Round(24 * scale);
+        var availableWidth = area.Width - 2 * margin - gap;
+        var preferredSettingsWidth = Math.Clamp(availableWidth / scale * 0.30, 390, 555);
+        var settingsWidth = (int)Math.Round(Math.Min(preferredSettingsWidth * scale, availableWidth * 0.52));
+        var settingsHeight = Math.Min((int)Math.Round(920 * scale), area.Height - 2 * margin);
+        var (width, height) = MeasureLauncher(availableWidth - settingsWidth, area.Height, scale);
+        var x = area.Left + (area.Width - width - gap - settingsWidth) / 2;
+        var y = area.Top + (area.Height - height) / 2;
+        var settingsY = Math.Max(area.Top + margin, area.Top + (area.Height - settingsHeight) / 2 - (int)(36 * scale));
+        Topmost = false;
+        PlaceWindow(this, x, y, width, height, scale);
+        PlaceWindow(settings, x + width + gap, settingsY, settingsWidth, settingsHeight, scale);
+    }
+
+    private void PositionCentered(WinForms.Screen screen, double scale)
+    {
+        var area = screen.WorkingArea;
+        var (width, height) = MeasureLauncher(area.Width, area.Height, scale);
+        PlaceWindow(this, area.Left + (area.Width - width) / 2, area.Top + (area.Height - height) / 2,
+            width, height, scale);
+    }
+
+    private static (int Width, int Height) MeasureLauncher(int width, int height, double scale)
+    {
+        var diameter = Math.Min(1480, Math.Min(width * 0.97 / scale - 24, height * 0.99 / scale - 108));
+        return ((int)Math.Round((diameter + 24) * scale), (int)Math.Round((diameter + 108) * scale));
+    }
+
+    private static void PlaceWindow(Window window, int x, int y, int width, int height, double scale)
+    {
+        window.Width = width / scale;
+        window.Height = height / scale;
+        var handle = new WindowInteropHelper(window).EnsureHandle();
+        NativeMethods.SetWindowPos(handle, IntPtr.Zero, x, y, width, height,
+            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER);
+    }
+
+    private static double MonitorScale(IntPtr window) => DpiScale(MonitorFromWindow(window, 2));
+
+    private static double DpiScale(IntPtr monitor) =>
+        monitor != IntPtr.Zero && GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 ? dpi / 96.0 : 1;
 
     internal void SetSections(IReadOnlyList<LaunchSection> sections)
     {
@@ -167,6 +205,7 @@ internal partial class LauncherWindow : Window
 
     internal void RefreshAppearance()
     {
+        ApplyBackgroundColor();
         RenderDock();
         Render();
     }
@@ -229,8 +268,6 @@ internal partial class LauncherWindow : Window
     {
         var card = new Grid { Margin = new Thickness(0, 0, 0, 12) };
         card.Children.Add(new Border { Background = CardBrush, CornerRadius = new CornerRadius(17) });
-        if (UseMediaGlass && LauncherGlass.Create() is { } effect)
-            AddGlass(card, effect);
         card.Children.Add(new Border
         {
             CornerRadius = new CornerRadius(17), BorderThickness = new Thickness(1),
@@ -265,16 +302,16 @@ internal partial class LauncherWindow : Window
         return card;
     }
 
-    private void AddGlass(Grid parent, LauncherGlass? effect, UIElement? anchor = null, Rect region = default)
+    private void AddBackground(Grid parent, UIElement? anchor = null, Rect region = default)
     {
-        var glass = new LauncherGlassLayer(Scene, effect, Math.Clamp(_config.GlassRefraction * 0.55, 0, 32), anchor, region);
-        glass.Loaded += (_, _) =>
+        var layer = new LauncherBackgroundLayer(Scene, anchor, region);
+        layer.Loaded += (_, _) =>
         {
-            _glass.Add(glass);
-            glass.Align();
+            _backgroundLayers.Add(layer);
+            layer.Align();
         };
-        glass.Unloaded += (_, _) => _glass.Remove(glass);
-        parent.Children.Add(glass);
+        layer.Unloaded += (_, _) => _backgroundLayers.Remove(layer);
+        parent.Children.Add(layer);
     }
 
     private Button BuildTile(LaunchEntry item, Size? compact = null)
@@ -503,97 +540,10 @@ internal partial class LauncherWindow : Window
         SaveChange();
     });
 
-    private void OpenOptions()
-    {
-        var menu = new ContextMenu
-        {
-            PlacementTarget = Options,
-            Placement = PlacementMode.Custom,
-            CustomPopupPlacementCallback = (popup, target, _) => new[]
-            {
-                new CustomPopupPlacement(new Point(target.Width - popup.Width, target.Height), PopupPrimaryAxis.Vertical),
-            },
-        };
-        AddMenu(menu, "选择图片或视频背景…", ChooseBackground);
-        AddMenu(menu, "调整背景颜色…", EditBackgroundColor);
-        AddMenu(menu, "恢复默认渐变", RestoreGradientBackground);
-        var win = new MenuItem { Header = "单按 Win 打开简桌", IsCheckable = true, IsChecked = _config.LauncherInterceptWinKey };
-        win.Click += (_, _) => { _config.LauncherInterceptWinKey = win.IsChecked; SaveChange(); };
-        menu.Items.Add(win);
-        menu.Items.Add(new Separator());
-        AddMenu(menu, "设置", () => { Hide(); SettingsRequested?.Invoke(); });
-        Options.ContextMenu = menu;
-        menu.IsOpen = true;
-    }
-
-    private void ChooseBackground() => Interact(() =>
-    {
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = "选择面板背景",
-            Filter = "图片与视频|*.png;*.jpg;*.jpeg;*.bmp;*.mp4;*.wmv|图片|*.png;*.jpg;*.jpeg;*.bmp|视频|*.mp4;*.wmv",
-        };
-        if (dialog.ShowDialog(this) == true && SetBackground(dialog.FileName)) SaveChange();
-    });
-
-    private bool SetBackground(string? path)
-    {
-        if (string.IsNullOrEmpty(path))
-        {
-            UseDefaultBackground();
-            _config.LauncherBackground = "";
-            RefreshAppearance();
-            return true;
-        }
-        try
-        {
-            if (!File.Exists(path)) throw new FileNotFoundException();
-            if (Path.GetExtension(path).ToLowerInvariant() is ".mp4" or ".wmv")
-            {
-                UseDefaultBackground();
-                _videoPath = path;
-                Motion.Opacity = 0;
-                Motion.Source = new Uri(path);
-                Motion.Visibility = Visibility.Visible;
-                if (IsVisible) Motion.Play();
-            }
-            else
-            {
-                var image = new BitmapImage();
-                image.BeginInit();
-                image.CacheOption = BitmapCacheOption.OnLoad;
-                image.DecodePixelWidth = 1920;
-                image.UriSource = new Uri(path);
-                image.EndInit();
-                image.Freeze();
-                UseDefaultBackground();
-                Still.Source = image;
-            }
-            _config.LauncherBackground = path;
-            RefreshAppearance();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("读取面板背景失败: " + ex.Message);
-            if (IsVisible) MessageBox.Show(this, "无法读取此背景。", "简桌", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return false;
-        }
-    }
-
-    private void UseDefaultBackground()
-    {
-        var hadVideo = _videoPath is not null;
-        _videoPath = null;
-        if (hadVideo) Motion.Close();
-        Motion.Visibility = Visibility.Collapsed;
-        Still.Source = null;
-    }
-
-    private void AlignGlass()
+    private void AlignBackgroundLayers()
     {
         if (!IsVisible) return;
-        foreach (var surface in _glass) surface.Align();
+        foreach (var surface in _backgroundLayers) surface.Align();
     }
 
     private void OnKeyDown(object sender, KeyEventArgs e)
@@ -658,6 +608,9 @@ internal partial class LauncherWindow : Window
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(POINT point, uint flags);
 
     [DllImport("shcore.dll")]
     private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);

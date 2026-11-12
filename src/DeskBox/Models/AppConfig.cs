@@ -77,11 +77,11 @@ public sealed class AppConfig
     public bool LiquidGlassEnabled { get; set; } = true;
     public double GlassBlur { get; set; } = 0;
     public double GlassRefraction { get; set; } = 28;
-    public string LauncherBackground { get; set; } = "";
     public int LauncherBackgroundBrightness { get; set; } = 100;
     public int LauncherBackgroundHue { get; set; }
     public int LauncherBackgroundSaturation { get; set; } = 100;
     public bool LauncherInterceptWinKey { get; set; } = true;
+    public bool LauncherInterceptStartButton { get; set; } = true;
     public Dictionary<string, long> LauncherOpenCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     internal void RecordLauncherOpen(string path)

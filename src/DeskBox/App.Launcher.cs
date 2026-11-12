@@ -10,6 +10,7 @@ public partial class App
 {
     private bool _launcherMode;
     private LauncherWindow? _launcher;
+    private DesktopClockWindow? _desktopClock;
     private WindowsKeyLauncher? _winKey;
     private LauncherCatalog _launcherCatalog = new(Array.Empty<LaunchEntry>(), Array.Empty<LaunchEntry>());
     private DispatcherTimer? _launcherRefresh;
@@ -31,12 +32,14 @@ public partial class App
             ScheduleSave();
         };
         _launcher.ShortcutDeleted += RemoveLauncherShortcut;
-        _launcher.SettingsRequested += ShowSettings;
+        _launcher.SettingsRequested += () => ShowSettings(_launcher);
         RefreshLauncher();
-        RefreshWinKey();
         _mouseWatcher = new DesktopMouseWatcher(iconsSuppressed: true);
         _mouseWatcher.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.BeginInvoke(ToggleLauncherTaskbar);
+        _mouseWatcher.TaskbarStartClicked += point => Dispatcher.BeginInvoke(
+            () => ToggleLauncher(point), DispatcherPriority.Input);
         _mouseWatcher.Start();
+        RefreshLauncherInput();
         WatchLauncher(hideDesktop: true);
         _startupComplete = true;
         RestoreStartupPriority();
@@ -62,13 +65,17 @@ public partial class App
     private void WatchLauncher(bool hideDesktop)
     {
         var suppressed = false;
-        void HideDesktop()
+        void RefreshDesktop()
         {
-            if (_iconLayer?.Suppress() != true || suppressed) return;
-            suppressed = true;
-            Log.Info("开始面板：Explorer 桌面图标层已隐藏。");
+            if (_iconLayer?.Suppress() == true && !suppressed)
+            {
+                suppressed = true;
+                Log.Info("开始面板：Explorer 桌面图标层已隐藏。");
+            }
+            RefreshDesktopClock();
+            if (_mouseWatcher is not null) _ = _mouseWatcher.RefreshStartButtonsAsync();
         }
-        if (hideDesktop) HideDesktop();
+        if (hideDesktop) RefreshDesktop();
         _launcherDebounce = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
         _launcherDebounce.Tick += async (_, _) =>
         {
@@ -80,12 +87,28 @@ public partial class App
         _launcherRefresh.Tick += (_, _) =>
         {
             // Explorer may start after DeskBox or restart during the session.
-            if (hideDesktop) HideDesktop();
+            if (hideDesktop) RefreshDesktop();
             if (++checks % 8 == 0) RequestLauncherScan();
         };
         _launcherRefresh.Start();
         RefreshLauncherWatchers();
         RequestLauncherScan();
+    }
+
+    private void RefreshDesktopClock()
+    {
+        var owner = NativeMethods.DesktopOwnerWindow();
+        if (_exiting || owner == IntPtr.Zero) return;
+        if (_desktopClock is not { } clock || !NativeMethods.IsWindow(clock.Handle))
+        {
+            clock = new DesktopClockWindow();
+            _desktopClock = clock;
+            clock.Closed += (_, _) =>
+            {
+                if (_desktopClock == clock) _desktopClock = null;
+            };
+        }
+        clock.ShowOnDesktop(owner);
     }
 
     private void OpenLauncher()
@@ -94,11 +117,13 @@ public partial class App
         _launcher.Open();
     }
 
-    private void ToggleLauncher()
+    private void ToggleLauncher() => ToggleLauncher(null);
+
+    private void ToggleLauncher(POINT? point)
     {
         if (_exiting || _launcher is null) return;
-        if (_launcher.IsVisible && _launcher.IsActive) _launcher.Hide();
-        else OpenLauncher();
+        if (_launcher.IsVisible && _launcher.IsSessionActive) _launcher.Hide();
+        else _launcher.Open(point);
     }
 
     private void ToggleLauncherTaskbar()
@@ -107,8 +132,17 @@ public partial class App
         _launcherTaskbarHidden = !_launcherTaskbarHidden;
         _taskbar ??= new DesktopTaskbar();
         _taskbar.SetHidden(_launcherTaskbarHidden);
+        if (!_launcherTaskbarHidden && _mouseWatcher is not null) _ = _mouseWatcher.RefreshStartButtonsAsync();
         var windows = NativeMethods.FindTaskbarWindows();
         Log.Info($"开始面板：{(_launcherTaskbarHidden ? "隐藏" : "显示")}任务栏，当前可见 {windows.Count(NativeMethods.IsWindowVisible)}/{windows.Count}。");
+    }
+
+    private void RefreshLauncherInput()
+    {
+        RefreshWinKey();
+        if (_mouseWatcher is not { } mouseWatcher) return;
+        mouseWatcher.RedirectTaskbarStart = _config.LauncherInterceptStartButton;
+        _ = mouseWatcher.RefreshStartButtonsAsync();
     }
 
     private void RefreshWinKey()
@@ -131,7 +165,7 @@ public partial class App
     {
         RefreshLauncher();
         RefreshLauncherWatchers();
-        RefreshWinKey();
+        RefreshLauncherInput();
         ScheduleSave();
     }
 

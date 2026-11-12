@@ -361,7 +361,7 @@
                                         <TextBlock x:Name="AppearanceHint" Text="外观调整会实时应用到所有盒子。" Style="{StaticResource Caption}" />
                                     </StackPanel>
                                 </Border>
-                                <Border Grid.Column="2" Style="{StaticResource Card}">
+                                <Border x:Name="LegacyGlassCard" Grid.Column="2" Style="{StaticResource Card}">
                                     <StackPanel>
                                         <TextBlock Text="Liquid Glass" Style="{StaticResource CardTitle}" />
                                         <Grid Margin="0,0,0,7">
@@ -392,6 +392,41 @@
                                             <TextBlock Text="折射强度" Style="{StaticResource RowLabel}" />
                                             <Slider x:Name="SlGlassRefraction" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="0" Maximum="80" ValueChanged="GlassSlider_ValueChanged" AutomationProperties.Name="折射强度" />
                                             <TextBlock x:Name="LblGlassRefraction" Grid.Column="2" Style="{StaticResource ValueLabel}" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                                <Border x:Name="LauncherColorCard" Grid.Column="2" Style="{StaticResource Card}" Visibility="Collapsed">
+                                    <StackPanel>
+                                        <TextBlock Text="面板背景颜色" Style="{StaticResource CardTitle}" />
+                                        <Grid Margin="0,0,0,16">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="56" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="48" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="亮度" Style="{StaticResource RowLabel}" />
+                                            <Slider x:Name="SlBackgroundBrightness" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="25" Maximum="180" ValueChanged="BackgroundColor_ValueChanged" AutomationProperties.Name="亮度" />
+                                            <TextBlock x:Name="LblBackgroundBrightness" Grid.Column="2" Style="{StaticResource ValueLabel}" />
+                                        </Grid>
+                                        <Grid Margin="0,0,0,16">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="56" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="48" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="色调" Style="{StaticResource RowLabel}" />
+                                            <Slider x:Name="SlBackgroundHue" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="-180" Maximum="180" ValueChanged="BackgroundColor_ValueChanged" AutomationProperties.Name="色调" />
+                                            <TextBlock x:Name="LblBackgroundHue" Grid.Column="2" Style="{StaticResource ValueLabel}" />
+                                        </Grid>
+                                        <Grid Margin="0,0,0,16">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="56" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="48" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="饱和度" Style="{StaticResource RowLabel}" />
+                                            <Slider x:Name="SlBackgroundSaturation" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="0" Maximum="200" ValueChanged="BackgroundColor_ValueChanged" AutomationProperties.Name="饱和度" />
+                                            <TextBlock x:Name="LblBackgroundSaturation" Grid.Column="2" Style="{StaticResource ValueLabel}" />
                                         </Grid>
                                     </StackPanel>
                                 </Border>
@@ -560,6 +595,22 @@
                                             <CheckBox x:Name="ChkAutoStart" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="开机自动启动" />
                                         </Grid>
                                         <TextBlock Text="登录 Windows 后自动运行简桌。" Style="{StaticResource Caption}" />
+                                        <Grid x:Name="LauncherWinKeyRow" Margin="0,18,0,0" Visibility="Collapsed">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="单按 Win 打开简桌" Style="{StaticResource RowLabel}" />
+                                            <CheckBox x:Name="ChkLauncherWinKey" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="单按 Win 打开简桌" />
+                                        </Grid>
+                                        <Grid x:Name="LauncherStartButtonRow" Margin="0,12,0,0" Visibility="Collapsed">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="点击任务栏开始按钮打开简桌" Style="{StaticResource RowLabel}" Margin="0,0,8,0" />
+                                            <CheckBox x:Name="ChkLauncherStartButton" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="点击任务栏开始按钮打开简桌" />
+                                        </Grid>
                                     </StackPanel>
                                 </Border>
                                 <Border Grid.Column="2" Style="{StaticResource Card}">

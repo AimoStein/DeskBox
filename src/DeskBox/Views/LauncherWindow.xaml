@@ -87,9 +87,6 @@
                         <GradientStop Color="#1A222C" Offset="1" />
                     </LinearGradientBrush>
                 </Grid.Background>
-                <Image x:Name="Still" Stretch="UniformToFill" />
-                <MediaElement x:Name="Motion" Stretch="UniformToFill" IsMuted="True"
-                              LoadedBehavior="Manual" UnloadedBehavior="Manual" Visibility="Collapsed" />
             </Grid>
         </Grid>
         <Grid Margin="12">
@@ -127,8 +124,7 @@
                 <Border BorderBrush="#997F94A5" BorderThickness="1" CornerRadius="22" IsHitTestVisible="False" />
                 <DockPanel Margin="10,2">
                     <Button x:Name="UngroupedButton" DockPanel.Dock="Left" Content="未分组" Style="{StaticResource PanelButton}" />
-                    <Button x:Name="Options" DockPanel.Dock="Right" Content="···" FontSize="18"
-                            ToolTip="面板选项" AutomationProperties.Name="面板选项" Style="{StaticResource PanelButton}" />
+                    <Button x:Name="SettingsButton" DockPanel.Dock="Right" Content="设置" Style="{StaticResource PanelButton}" />
                     <Button x:Name="AddGroup" DockPanel.Dock="Right" Content="＋" FontSize="16"
                             ToolTip="新建分组" AutomationProperties.Name="新建分组" Style="{StaticResource PanelButton}" />
                     <Button x:Name="AllApps" DockPanel.Dock="Right" Content="应用" ToolTip="已安装应用" Style="{StaticResource PanelButton}" />
