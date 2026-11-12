@@ -77,6 +77,18 @@ public sealed class AppConfig
     public bool LiquidGlassEnabled { get; set; } = true;
     public double GlassBlur { get; set; } = 0;
     public double GlassRefraction { get; set; } = 28;
+    public string LauncherBackground { get; set; } = "";
+    public int LauncherBackgroundBrightness { get; set; } = 100;
+    public int LauncherBackgroundHue { get; set; }
+    public int LauncherBackgroundSaturation { get; set; } = 100;
+    public bool LauncherInterceptWinKey { get; set; } = true;
+    public Dictionary<string, long> LauncherOpenCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    internal void RecordLauncherOpen(string path)
+    {
+        var count = LauncherOpenCounts.GetValueOrDefault(path);
+        if (count < long.MaxValue) LauncherOpenCounts[path] = count + 1;
+    }
 
     public bool AutoStart { get; set; }
     public bool AutoCheckForUpdates { get; set; } = true;
@@ -257,6 +269,12 @@ public static class ConfigStore
     {
         cfg.Boxes ??= new List<BoxConfig>();
         cfg.ShortcutAliases = new Dictionary<string, string>(cfg.ShortcutAliases ?? new(), StringComparer.Ordinal);
+        var openCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        if (cfg.LauncherOpenCounts is not null)
+            foreach (var (path, count) in cfg.LauncherOpenCounts)
+                if (count > 0 && !string.IsNullOrWhiteSpace(path))
+                    openCounts[path] = Math.Max(openCounts.GetValueOrDefault(path), count);
+        cfg.LauncherOpenCounts = openCounts;
         cfg.LastOrganize ??= new List<MoveRecord>();
 
         if (string.IsNullOrWhiteSpace(cfg.BoxRoot))

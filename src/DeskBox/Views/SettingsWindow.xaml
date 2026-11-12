@@ -330,7 +330,7 @@
                                 <Border Style="{StaticResource Card}">
                                     <StackPanel>
                                         <TextBlock Text="背景与主题" Style="{StaticResource CardTitle}" />
-                                        <TextBlock Text="盒子主题" Style="{StaticResource RowLabel}" Margin="0,0,0,9" />
+                                        <TextBlock x:Name="ThemeLabel" Text="盒子主题" Style="{StaticResource RowLabel}" Margin="0,0,0,9" />
                                         <Border Background="#202223" CornerRadius="10" Padding="3" Margin="0,0,0,18">
                                             <UniformGrid Columns="3">
                                                 <ToggleButton x:Name="PillLight" Content="浅色" Tag="Light" Style="{StaticResource PillToggle}" Click="Theme_Click" />
@@ -338,7 +338,7 @@
                                                 <ToggleButton x:Name="PillSystem" Content="跟随系统" Tag="System" Style="{StaticResource PillToggle}" Click="Theme_Click" />
                                             </UniformGrid>
                                         </Border>
-                                        <Grid Margin="0,0,0,16">
+                                        <Grid x:Name="BoxOpacityRow" Margin="0,0,0,16">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="77" />
                                                 <ColumnDefinition Width="*" />
@@ -348,7 +348,7 @@
                                             <Slider x:Name="SlOpacity" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="0" Maximum="100" ValueChanged="Slider_ValueChanged" AutomationProperties.Name="背景浓度" />
                                             <TextBlock x:Name="LblOpacity" Grid.Column="2" Style="{StaticResource ValueLabel}" />
                                         </Grid>
-                                        <Grid Margin="0,0,0,16">
+                                        <Grid x:Name="BoxRadiusRow" Margin="0,0,0,16">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="77" />
                                                 <ColumnDefinition Width="*" />
@@ -358,7 +358,7 @@
                                             <Slider x:Name="SlRadius" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="10" Maximum="100" ValueChanged="Slider_ValueChanged" AutomationProperties.Name="圆角" />
                                             <TextBlock x:Name="LblRadius" Grid.Column="2" Style="{StaticResource ValueLabel}" />
                                         </Grid>
-                                        <TextBlock Text="外观调整会实时应用到所有盒子。" Style="{StaticResource Caption}" />
+                                        <TextBlock x:Name="AppearanceHint" Text="外观调整会实时应用到所有盒子。" Style="{StaticResource Caption}" />
                                     </StackPanel>
                                 </Border>
                                 <Border Grid.Column="2" Style="{StaticResource Card}">
@@ -372,8 +372,8 @@
                                             <TextBlock Text="实时玻璃背景" Style="{StaticResource RowLabel}" />
                                             <CheckBox x:Name="ChkGlass" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="实时玻璃背景" />
                                         </Grid>
-                                        <TextBlock Text="为静态壁纸和可捕获的动态壁纸呈现折射与光泽。" Style="{StaticResource Caption}" Margin="0,0,0,19" />
-                                        <Grid Margin="0,0,0,16">
+                                        <TextBlock x:Name="GlassHint" Text="为静态壁纸和可捕获的动态壁纸呈现折射与光泽。" Style="{StaticResource Caption}" Margin="0,0,0,19" />
+                                        <Grid x:Name="GlassBlurRow" Margin="0,0,0,16">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="77" />
                                                 <ColumnDefinition Width="*" />
@@ -403,9 +403,9 @@
                                         <ColumnDefinition Width="18" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <Border Style="{StaticResource Card}">
+                                    <Border x:Name="IconSizeCard" Style="{StaticResource Card}">
                                         <StackPanel>
-                                            <TextBlock Text="盒内图标" Style="{StaticResource CardTitle}" />
+                                            <TextBlock x:Name="IconCardTitle" Text="盒内图标" Style="{StaticResource CardTitle}" />
                                             <Grid Margin="0,0,0,18">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="77" />
@@ -424,12 +424,12 @@
                                                 <TextBlock Text="显示隐藏文件" Style="{StaticResource RowLabel}" />
                                                 <CheckBox x:Name="ChkHidden" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="显示隐藏文件" />
                                             </Grid>
-                                            <TextBlock Text="在盒子中显示带隐藏属性的条目。" Style="{StaticResource Caption}" Margin="0,0,0,20" />
+                                            <TextBlock x:Name="HiddenHint" Text="在盒子中显示带隐藏属性的条目。" Style="{StaticResource Caption}" Margin="0,0,0,20" />
                                             <Button Content="打开分组配置文件夹" Style="{StaticResource GhostButton}" Click="OpenRoot_Click" />
-                                            <TextBlock Text="图标大小同时应用于图标与列表视图。" Style="{StaticResource Caption}" Margin="0,18,0,0" />
+                                            <TextBlock x:Name="BoxIconHint" Text="图标大小同时应用于图标与列表视图。" Style="{StaticResource Caption}" Margin="0,18,0,0" />
                                         </StackPanel>
                                     </Border>
-                                    <Border Grid.Column="2" Style="{StaticResource Card}">
+                                    <Border x:Name="DesktopIconCard" Grid.Column="2" Style="{StaticResource Card}">
                                         <StackPanel>
                                             <TextBlock Text="桌面图标" Style="{StaticResource CardTitle}" />
                                             <Grid Margin="0,0,0,16">

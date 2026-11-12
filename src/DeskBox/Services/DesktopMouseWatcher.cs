@@ -11,12 +11,14 @@ public sealed class DesktopMouseWatcher : IDisposable
     private const int DoubleClickTolerance = 5;
 
     private readonly NativeMethods.LowLevelMouseProc _callback;
+    private readonly bool _iconsSuppressed;
     private IntPtr _hook = IntPtr.Zero;
     private uint _lastClickTime;
     private POINT _lastClickPoint;
 
-    public DesktopMouseWatcher()
+    public DesktopMouseWatcher(bool iconsSuppressed = false)
     {
+        _iconsSuppressed = iconsSuppressed;
         _callback = HookProc;
     }
 
@@ -39,7 +41,7 @@ public sealed class DesktopMouseWatcher : IDisposable
 
         if (_hook == IntPtr.Zero)
         {
-            Log.Warn("安装鼠标钩子失败，双击隐藏桌面图标将不可用。");
+            Log.Warn("安装鼠标钩子失败，桌面双击操作将不可用。");
         }
     }
 
@@ -50,6 +52,12 @@ public sealed class DesktopMouseWatcher : IDisposable
             if (nCode >= 0 && Enabled && wParam.ToInt32() == NativeMethods.WM_LBUTTONDOWN)
             {
                 var data = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                var window = NativeMethods.WindowFromPoint(data.pt);
+                if (!IsDesktopSurface(window))
+                {
+                    _lastClickTime = 0;
+                    return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
+                }
                 var isDouble = _lastClickTime != 0
                                && data.time - _lastClickTime <= DoubleClickMilliseconds
                                && Math.Abs(data.pt.X - _lastClickPoint.X) <= DoubleClickTolerance
@@ -58,7 +66,8 @@ public sealed class DesktopMouseWatcher : IDisposable
                 if (isDouble)
                 {
                     _lastClickTime = 0;
-                    if (IsEmptyDesktopPoint(data.pt))
+                    if ((_iconsSuppressed && NativeMethods.ClassNameOf(window) != "SysListView32") ||
+                        IsEmptyDesktopPoint(data.pt))
                     {
                         EmptyDesktopDoubleClicked?.Invoke(this, EventArgs.Empty);
                     }
@@ -78,22 +87,13 @@ public sealed class DesktopMouseWatcher : IDisposable
         return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 
-    /// <summary>判断这个点是否落在桌面空白处（而不是图标、窗口或我们的盒子上）。</summary>
+    private static bool IsDesktopSurface(IntPtr window) => window != IntPtr.Zero &&
+        (NativeMethods.IsDesktopWindow(window) ||
+         NativeMethods.IsDesktopWindow(NativeMethods.GetAncestor(window, NativeMethods.GA_ROOT)));
+
+    /// <summary>When Explorer icons are visible, double-clicks on items keep their normal action.</summary>
     private static bool IsEmptyDesktopPoint(POINT point)
     {
-        var hwnd = NativeMethods.WindowFromPoint(point);
-        if (hwnd == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        var className = NativeMethods.ClassNameOf(hwnd);
-        var onDesktop = className is "SysListView32" or "SHELLDLL_DefView" or "Progman" or "WorkerW";
-        if (!onDesktop)
-        {
-            return false;
-        }
-
         try
         {
             var element = AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y));

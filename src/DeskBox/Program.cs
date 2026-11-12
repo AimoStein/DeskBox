@@ -8,18 +8,19 @@ internal static class Program
     private static void Main(string[] args)
     {
         var diagnostics = args.Any(arg => arg.Equals("--selftest", StringComparison.OrdinalIgnoreCase) ||
-            arg is "--desktop-icons-probe" or "--glass-preview" ||
+            arg is "--desktop-icons-probe" or "--glass-preview" or "--launcher-preview" ||
             arg.StartsWith("--glass-smoketest=", StringComparison.OrdinalIgnoreCase) ||
             arg.StartsWith("--glass-probe=", StringComparison.OrdinalIgnoreCase));
         using var instance = diagnostics ? null : new AppInstance();
         if (instance is not null && !instance.TryAcquire())
         {
-            AppInstance.SendToPrimary(args.Length == 0 ? new[] { "--settings" } : args);
+            AppInstance.SendToPrimary(args.Length == 0 ? new[] { "--action=launcher" } : args);
             return;
         }
 
         using var icons = new DesktopIconLayer();
-        var preview = !diagnostics && args.Contains("--startup", StringComparer.OrdinalIgnoreCase)
+        var preview = !diagnostics && args.Contains("--desktop-boxes", StringComparer.OrdinalIgnoreCase) &&
+            args.Contains("--startup", StringComparer.OrdinalIgnoreCase)
             ? new StartupDesktop(icons) : null;
         try
         {

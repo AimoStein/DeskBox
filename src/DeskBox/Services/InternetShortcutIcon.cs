@@ -1,6 +1,4 @@
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Windows;
 using System.Windows.Media.Imaging;
 
 namespace DeskBox.Services;
@@ -60,29 +58,6 @@ internal static class InternetShortcutIcon
     internal static BitmapSource? Load(string shortcut, int size)
     {
         var location = ReadLocation(shortcut);
-        if (location is null || !File.Exists(location.Value.Path)) return null;
-        IntPtr[] icons = new IntPtr[1];
-        try
-        {
-            var count = PrivateExtractIcons(location.Value.Path, location.Value.Index,
-                size, size, icons, new uint[1], 1, 0);
-            if (count != 1 || icons[0] == IntPtr.Zero) return null;
-            var bitmap = System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
-                icons[0], Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-            bitmap.Freeze();
-            return bitmap;
-        }
-        catch { return null; }
-        finally
-        {
-            if (icons[0] != IntPtr.Zero) DestroyIcon(icons[0]);
-        }
+        return location is { } icon ? ShortcutIcon.ExtractResource(icon.Path, icon.Index, size) : null;
     }
-
-    [DllImport("user32.dll", EntryPoint = "PrivateExtractIconsW", CharSet = CharSet.Unicode)]
-    private static extern uint PrivateExtractIcons(string file, int index, int width, int height,
-        [Out] IntPtr[] icons, [Out] uint[] ids, uint count, uint flags);
-
-    [DllImport("user32.dll")]
-    private static extern bool DestroyIcon(IntPtr icon);
 }

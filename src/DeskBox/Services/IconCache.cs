@@ -13,6 +13,7 @@ namespace DeskBox.Services;
 public static class IconCache
 {
     private static readonly ConcurrentDictionary<int, BitmapSource> Placeholders = new();
+    private static readonly ConcurrentDictionary<int, BitmapSource> UnavailableIcons = new();
 
     /// <summary>清空内存缓存（磁盘缓存保留，下次取图会走「磁盘命中」秒出）。</summary>
     public static void Clear() => IconLoader.ClearMemory();
@@ -38,6 +39,30 @@ public static class IconCache
 
     public static BitmapSource Placeholder(int size) =>
         Placeholders.GetOrAdd(size, CreatePlaceholder);
+
+    internal static BitmapSource Unavailable(int size) =>
+        UnavailableIcons.GetOrAdd(size, CreateUnavailable);
+
+    private static BitmapSource CreateUnavailable(int size)
+    {
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            dc.DrawImage(Placeholder(size), new Rect(0, 0, size, size));
+            var badge = new Point(size * 0.75, size * 0.75);
+            var radius = size * 0.22;
+            dc.DrawEllipse(Brushes.Bisque, null, badge, radius, radius);
+            var ink = new Pen(Brushes.SaddleBrown, Math.Max(1.25, size * 0.042))
+                { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round };
+            dc.DrawLine(ink, badge - new Vector(0, radius * 0.48), badge + new Vector(0, radius * 0.10));
+            dc.DrawEllipse(Brushes.SaddleBrown, null, badge + new Vector(0, radius * 0.46),
+                ink.Thickness / 2, ink.Thickness / 2);
+        }
+        var bitmap = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        bitmap.Freeze();
+        return bitmap;
+    }
 
     private static BitmapSource CreatePlaceholder(int size)
     {

@@ -9,7 +9,7 @@ public sealed class TrayService : IDisposable
     private readonly WinForms.NotifyIcon _notifyIcon;
     private readonly WinForms.ContextMenuStrip _menu;
 
-    public TrayService()
+    public TrayService(bool launcherMode = false)
     {
         _menu = new WinForms.ContextMenuStrip
         {
@@ -20,11 +20,13 @@ public sealed class TrayService : IDisposable
         };
 
         ItemArrange = Add("整理盒子（排列整齐）", "arrange");
-        ItemNewBox = Add("新建盒子", "newbox");
+        ItemArrange.Visible = !launcherMode;
+        if (launcherMode) Add("打开简桌", "launcher");
+        ItemNewBox = Add(launcherMode ? "新建分组" : "新建盒子", "newbox");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
         ItemOrganize = Add("按类型分组桌面项目", "organize");
         ItemUndo = Add("撤销上次整理", "undo");
-        ItemToggleIcons = Add("显示 / 隐藏桌面图标", "toggleicons");
+        ItemToggleIcons = launcherMode ? Add("隐藏任务栏", "toggletaskbar") : Add("显示 / 隐藏桌面图标", "toggleicons");
         ItemBoxRoot = Add("打开分组配置文件夹", "openroot");
         _menu.Items.Add(new WinForms.ToolStripSeparator());
         Add("设置", "settings");
@@ -43,7 +45,7 @@ public sealed class TrayService : IDisposable
             ContextMenuStrip = _menu,
         };
 
-        _notifyIcon.DoubleClick += (_, _) => Command?.Invoke("settings");
+        _notifyIcon.DoubleClick += (_, _) => Command?.Invoke(launcherMode ? "launcher" : "settings");
         _notifyIcon.BalloonTipClicked += (_, _) => Command?.Invoke("settings");
     }
 

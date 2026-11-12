@@ -12,17 +12,34 @@ namespace DeskBox.Views;
 public partial class SettingsWindow : Window
 {
     private readonly AppConfig _config;
+    private readonly bool _launcherMode;
     private bool _loading;
     private string _section = "icons";
 
-    public SettingsWindow(AppConfig config)
+    public SettingsWindow(AppConfig config, bool launcherMode = false)
     {
         _config = config;
+        _launcherMode = launcherMode;
 
         // XAML 解析期间（Minimum/Maximum 赋值）就会触发 ValueChanged，
         // 这时其它命名控件还没构造出来，必须先把标志立起来。
         _loading = true;
         InitializeComponent();
+        if (launcherMode)
+        {
+            NavLayout.Visibility = Visibility.Collapsed;
+            DesktopIconCard.Visibility = Visibility.Collapsed;
+            Grid.SetColumnSpan(IconSizeCard, 3);
+            BoxOpacityRow.Visibility = Visibility.Collapsed;
+            BoxRadiusRow.Visibility = Visibility.Collapsed;
+            GlassBlurRow.Visibility = Visibility.Collapsed;
+            BoxIconHint.Visibility = Visibility.Collapsed;
+            ThemeLabel.Text = "设置主题";
+            IconCardTitle.Text = "面板图标";
+            HiddenHint.Text = "在面板中显示带隐藏属性的桌面项目。";
+            AppearanceHint.Text = "在开始面板右上角的菜单中更换背景。";
+            GlassHint.Text = "对开始面板里的图片或视频背景呈现折射。";
+        }
 
         Loaded += (_, _) =>
         {
@@ -104,7 +121,7 @@ public partial class SettingsWindow : Window
                 : $"上次整理：{_config.LastOrganizeTime}，共 {_config.LastOrganize.Count} 项。";
 
             BtnUndo.IsEnabled = _config.LastOrganize.Count > 0;
-            LblHint.Text = _config.HideIconsOnDoubleClick
+            LblHint.Text = _launcherMode ? "双击桌面空白处可切换任务栏显示。" : _config.HideIconsOnDoubleClick
                 ? (_config.HideTaskbarWithIcons
                     ? "提示：双击桌面可隐藏原图标和任务栏，分组是否隐藏由上方开关决定。"
                     : "提示：双击桌面可隐藏原图标，分组是否隐藏由上方开关决定。")
@@ -266,12 +283,12 @@ public partial class SettingsWindow : Window
             page.Visibility = Equals(page.Tag, section) ? Visibility.Visible : Visibility.Collapsed;
         (PageTitle.Text, PageSubtitle.Text) = section switch
         {
-            "appearance" => ("外观", "调整盒子背景、玻璃效果与主题。"),
+            "appearance" => ("外观", _launcherMode ? "调整面板玻璃效果与设置主题。" : "调整盒子背景、玻璃效果与主题。"),
             "layout" => ("盒子排布", "让桌面上的盒子对齐、有序，保持恰好的间距。"),
             "organize" => ("整理", "按类型归类桌面文件，也可以随时撤销上次整理。"),
             "general" => ("常规", "管理启动方式与本地数据。"),
             "updates" => ("版本更新", "获取最新功能与改进，保留熟悉的桌面布局。"),
-            _ => ("图标", "调整盒内图标大小与桌面图标的显示方式。"),
+            _ => ("图标", _launcherMode ? "调整面板图标大小和隐藏文件的显示。" : "调整盒内图标大小与桌面图标的显示方式。"),
         };
         Scroller.ScrollToTop();
     }

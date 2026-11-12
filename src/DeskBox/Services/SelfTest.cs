@@ -1169,6 +1169,35 @@ public static class SelfTest
             File.WriteAllText(urlProbe, "[InternetShortcut]\nIconFile=https://example.com/icon.ico\n");
             Check("URL图标-不读取远程图标", InternetShortcutIcon.ReadLocation(urlProbe) is null);
 
+            var appTarget = Path.Combine(Environment.SystemDirectory, "notepad.exe");
+            var appShortcut = Path.Combine(iconProbeDir, "程序.lnk");
+            var appLink = Interop.ShellItemInterop.CreateShellLink();
+            try
+            {
+                var persist = (Interop.ShellItemInterop.IPersistFile)appLink;
+                appLink.SetPath(appTarget);
+                appLink.SetIconLocation(urlIcon, 0);
+                persist.Save(appShortcut, true);
+                Check("LNK图标-优先保留自定义图标", HasColor(IconCache.Get(appShortcut, iconSize), 0, 255));
+
+                var missingIconLink = Path.Combine(iconProbeDir, "丢失安装图标.lnk");
+                appLink.SetIconLocation(Path.Combine(iconProbeDir, "deleted.ico"), 0);
+                persist.Save(missingIconLink, true);
+                byte[] IconPixels(System.Windows.Media.Imaging.BitmapSource? source)
+                {
+                    if (source is null) return Array.Empty<byte>();
+                    var bitmap = new System.Windows.Media.Imaging.FormatConvertedBitmap(source,
+                        System.Windows.Media.PixelFormats.Bgra32, null, 0);
+                    var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+                    bitmap.CopyPixels(pixels, bitmap.PixelWidth * 4, 0);
+                    return pixels;
+                }
+                var expected = IconPixels(ShortcutIcon.ExtractResource(appTarget, 0, iconSize));
+                Check("LNK图标-安装图标消失后回退到目标程序原图",
+                    expected.Length > 0 && IconPixels(IconCache.Get(missingIconLink, iconSize)).SequenceEqual(expected));
+            }
+            finally { System.Runtime.InteropServices.Marshal.ReleaseComObject(appLink); }
+
             var probeIcon = IconCache.Get(iconProbe, iconSize);
             Check("图标-首次取图非空", probeIcon is not null);
             Check("图标-位图已冻结可跨线程", probeIcon is null || probeIcon.IsFrozen);
@@ -1252,6 +1281,7 @@ public static class SelfTest
         UpdateSelfTest.Run(Check);
         VirtualGroupSelfTest.Run(Check, sandbox);
         DesktopCatalogSelfTest.Run(Check, sandbox);
+        LauncherSelfTest.Run(Check, sandbox);
         report.AppendLine();
         report.AppendLine(failures == 0 ? "自检结果：全部通过" : $"自检结果：{failures} 项失败");
 

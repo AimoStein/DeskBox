@@ -107,7 +107,8 @@ internal static class IconLoader
         }
 
         return $"{path}|{size}|{ticks}" +
-            (InternetShortcutIcon.IsShortcut(path) ? InternetShortcutIcon.CacheSignature(path) : "");
+            (ShortcutIcon.IsLink(path) ? "|lnk-icon-v2" :
+                InternetShortcutIcon.IsShortcut(path) ? InternetShortcutIcon.CacheSignature(path) : "");
     }
 
     /// <summary>只查内存缓存，立即返回，绝不碰 shell 或磁盘。</summary>
@@ -401,6 +402,38 @@ internal static class IconLoader
                 if (explicitIcon is not null) return explicitIcon;
             }
 
+            if (ShortcutIcon.IsLink(path))
+            {
+                var (iconPath, iconIndex, target) = ShortcutIcon.ReadLink(path);
+                if (iconPath is not null && ShortcutIcon.ExtractResource(iconPath, iconIndex, size) is { } custom)
+                    return custom;
+                if (target is not null && Path.IsPathFullyQualified(target) && !target.StartsWith(@"\\"))
+                {
+                    // Shell may return a generic image for the link itself if
+                    // its stored icon location points to a deleted installer file.
+                    if (!FsUtil.PathExists(target)) return null;
+                    if (Path.GetExtension(target).Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
+                        ShortcutIcon.ExtractResource(target, 0, size) is { } app)
+                        return app;
+                    var targetImage = ExtractShellImage(target, size, out _);
+                    if (targetImage is not null) return targetImage;
+                }
+            }
+
+            return ExtractShellImage(path, size, out pending);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"取图标失败 {path}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static BitmapSource? ExtractShellImage(string path, int size, out bool pending)
+    {
+        pending = false;
+        try
+        {
             NativeMethods.SHCreateItemFromParsingName(path, IntPtr.Zero, IidShellItemImageFactory, out var factory);
             try
             {
@@ -437,11 +470,7 @@ internal static class IconLoader
                 System.Runtime.InteropServices.Marshal.ReleaseComObject(factory);
             }
         }
-        catch (Exception ex)
-        {
-            Log.Warn($"取图标失败 {path}: {ex.Message}");
-            return null;
-        }
+        catch (System.Runtime.InteropServices.COMException) { return null; }
     }
 
     private static string ModeKey(string key, bool allowShell) => allowShell ? key : key + "|warm";

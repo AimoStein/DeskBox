@@ -161,6 +161,7 @@ public static class NativeMethods
     public const ushort FOF_NOCONFIRMATION = 0x0010;
     public const ushort FOF_ALLOWUNDO = 0x0040;
     public const ushort FOF_NOERRORUI = 0x0400;
+    private const ushort FOF_WANTNUKEWARNING = 0x4000;
 
     public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -781,13 +782,15 @@ public static class NativeMethods
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
     /// <summary>删除到回收站。</summary>
-    public static bool DeleteToRecycleBin(string path)
+    public static bool DeleteToRecycleBin(string path, IntPtr owner = default, bool warnIfPermanent = false)
     {
         var op = new SHFILEOPSTRUCT
         {
+            hwnd = owner,
             wFunc = FO_DELETE,
             pFrom = path + "\0",
-            fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT),
+            fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT |
+                (warnIfPermanent ? FOF_WANTNUKEWARNING : 0)),
         };
 
         return SHFileOperation(ref op) == 0 && !op.fAnyOperationsAborted;

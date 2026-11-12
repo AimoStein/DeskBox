@@ -115,6 +115,14 @@ public static class VirtualGroups
             for (var i = 0; i < box.ItemOrder.Count; i++)
                 box.ItemOrder[i] = Remap(box.ItemOrder[i]);
         }
+        foreach (var (path, count) in config.LauncherOpenCounts.ToArray())
+        {
+            var replacement = Remap(path);
+            if (string.Equals(path, replacement, StringComparison.OrdinalIgnoreCase)) continue;
+            config.LauncherOpenCounts.Remove(path);
+            config.LauncherOpenCounts[replacement] = Math.Max(config.LauncherOpenCounts.GetValueOrDefault(replacement), count);
+            changed = true;
+        }
         // 外部重命名后，撤销分组仍应指向当前对象，而不是已经失效的旧名字。
         foreach (var record in config.LastOrganize.Where(record => !string.IsNullOrEmpty(record.GroupId)))
             record.From = record.To = Remap(record.To);

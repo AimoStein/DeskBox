@@ -186,20 +186,23 @@ public static class FsUtil
     }
 
     /// <summary>用系统默认程序打开。</summary>
-    public static void Open(string path)
+    public static void Open(string path) => TryOpen(path);
+
+    internal static bool TryOpen(string path)
     {
         try
         {
-            if (ShellItemInterop.LooksLikeParsingName(path))
-            {
-                Process.Start(new ProcessStartInfo("explorer.exe", Quote(path)) { UseShellExecute = true });
-                return;
-            }
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            var startInfo = ShellItemInterop.LooksLikeParsingName(path)
+                ? new ProcessStartInfo("explorer.exe", Quote(path))
+                : new ProcessStartInfo(path);
+            startInfo.UseShellExecute = true;
+            Process.Start(startInfo);
+            return true;
         }
         catch (Exception ex)
         {
             Log.Warn($"打开失败 {path}: {ex.Message}");
+            return false;
         }
     }
 

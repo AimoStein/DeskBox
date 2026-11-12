@@ -48,6 +48,9 @@ public static class ShellItemInterop
         uint sfgaoIn,
         out uint psfgaoOut);
 
+    [DllImport("shell32.dll")]
+    private static extern int SHOpenFolderAndSelectItems(IntPtr pidl, uint count, IntPtr children, uint flags);
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHGetPathFromIDListW")]
     private static extern bool SHGetPathFromIDListW(IntPtr pidl, StringBuilder pszPath);
 
@@ -376,6 +379,16 @@ public static class ShellItemInterop
         }
     }
 
+    /// <summary>在资源管理器中选中原始路径对应的项目，包括快捷方式文件本身。</summary>
+    internal static bool RevealItem(string path)
+    {
+        using var com = EnsureComInitialized();
+        var pidl = ParseDisplayName(path);
+        if (pidl == IntPtr.Zero) return false;
+        try { return SHOpenFolderAndSelectItems(pidl, 0, IntPtr.Zero, 0) == S_OK; }
+        finally { FreePidl(pidl); }
+    }
+
     /// <summary>PIDL → 文件系统路径；不是真实文件（系统图标）时返回 null。</summary>
     public static string? GetFileSystemPath(IntPtr pidl)
     {
@@ -437,7 +450,8 @@ public static class ShellItemInterop
     /// 有些来源会把命名空间项混在 FileDrop 里，得按虚拟项处理。
     /// </summary>
     public static bool LooksLikeParsingName(string? value) =>
-        !string.IsNullOrWhiteSpace(value) && value.StartsWith("::", StringComparison.Ordinal);
+        !string.IsNullOrWhiteSpace(value) && (value.StartsWith("::", StringComparison.Ordinal) ||
+            value.StartsWith(@"shell:AppsFolder\", StringComparison.OrdinalIgnoreCase));
 
     // ---------------------------------------------------------------- 真实拖放数据源
 

@@ -133,10 +133,17 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Contains("--launcher-preview", StringComparer.OrdinalIgnoreCase))
+        {
+            PreviewLauncher();
+            return;
+        }
+
+        _launcherMode = !e.Args.Contains("--desktop-boxes", StringComparer.OrdinalIgnoreCase);
         _instance!.CommandReceived += args => Dispatcher.BeginInvoke(() =>
         {
             if (_exiting) return;
-            if (_desktopActive) HandleArgs(args);
+            if (_launcherMode ? _startupComplete : _desktopActive) HandleArgs(args);
             else _startupCommands.Add(args);
         });
         _instance.StartServer();
@@ -159,7 +166,7 @@ public partial class App : Application
 
         // 盒子还没建，先把各盒子目录里的图标从磁盘缓存解码进内存：
         // 这样等窗口真正显示时，格内图标已经就绪，不会先闪一排占位图再换。
-        PrewarmBoxIcons();
+        if (!_launcherMode) PrewarmBoxIcons();
 
         ThemeManager.Apply(_config.Theme);
         LogStartupStage("主题应用");
@@ -197,6 +204,7 @@ public partial class App : Application
             foreach (var box in _boxes) box.RecheckReferenceLocations();
             var migrated = VirtualGroups.Migrate(_config);
             if (!migrated) return;
+            if (_launcherMode) LauncherConfigChanged();
             RequestDesktopScan();
             foreach (var box in _boxes) box.RefreshFromConfig(reloadItems: true);
             ConfigStore.Save(_config);
@@ -211,6 +219,12 @@ public partial class App : Application
         }
 
         Log.Info($"启动：首次运行={firstRun}，已有盒子={_config.Boxes.Count}，根目录={_config.EffectiveBoxRoot}");
+
+        if (_launcherMode)
+        {
+            StartLauncher(firstRun, e.Args);
+            return;
+        }
 
         // 监听要最先挂上：任务计划程序登录任务可能比 Explorer 还早启动，
         // 桌面窗口随后出现时会盖住盒子，越早收到"桌面显示"事件越能第一时间插回去。
@@ -265,9 +279,9 @@ public partial class App : Application
     /// </summary>
     private void FinishStartupWork(bool firstRun, string[] args)
     {
-        StartDesktopWatch();
+        if (!_launcherMode) StartDesktopWatch();
         ScheduleSave();
-        if (firstRun && _boxes.Count == 0)
+        if (!_launcherMode && firstRun && _boxes.Count == 0)
         {
             CreateNewBox();
         }
@@ -277,11 +291,14 @@ public partial class App : Application
             CreateTray();
         }
 
-        _mouseWatcher = new DesktopMouseWatcher { Enabled = _config.HideIconsOnDoubleClick };
-        _mouseWatcher.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.BeginInvoke(ToggleIconsFromUser);
-        _mouseWatcher.Start();
-        SyncTaskbarVisibility();
-        LogStartupStage("鼠标钩子");
+        if (!_launcherMode)
+        {
+            _mouseWatcher = new DesktopMouseWatcher { Enabled = _config.HideIconsOnDoubleClick };
+            _mouseWatcher.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.BeginInvoke(ToggleIconsFromUser);
+            _mouseWatcher.Start();
+            SyncTaskbarVisibility();
+            LogStartupStage("鼠标钩子");
+        }
 
         // 右键菜单改由设置窗口承担，这里把历史版本写过的注册项清掉
         if (ContextMenuRegistrar.IsRegistered())
@@ -314,6 +331,7 @@ public partial class App : Application
         {
             HandleArgs(args);
         }
+        else if (_launcherMode) OpenLauncher();
         else if (firstRun)
         {
             _tray?.ShowInfo(
@@ -336,7 +354,7 @@ public partial class App : Application
     {
         try
         {
-            _tray = new TrayService();
+            _tray = new TrayService(_launcherMode);
             _tray.Command += HandleCommand;
             _tray.MenuOpening += UpdateTrayState;
             _tray.ApplyTheme();
@@ -358,7 +376,7 @@ public partial class App : Application
 
                 try
                 {
-                    _tray = new TrayService();
+                    _tray = new TrayService(_launcherMode);
                     _tray.Command += HandleCommand;
                     _tray.MenuOpening += UpdateTrayState;
                     _tray.ApplyTheme();
@@ -1332,6 +1350,12 @@ public partial class App : Application
 
     private void CreateNewBox()
     {
+        if (_launcherMode)
+        {
+            OpenLauncher();
+            _launcher?.CreateGroup();
+            return;
+        }
         var title = "新盒子";
         var index = 2;
         while (_config.Boxes.Any(b => string.Equals(b.Title, title, StringComparison.OrdinalIgnoreCase)))
@@ -1391,6 +1415,7 @@ public partial class App : Application
 
     private void EnsureBox(string title)
     {
+        if (_launcherMode) return;
         var boxConfig = _config.Boxes.FirstOrDefault(box => box.IsVirtual && box.Title == title);
         if (boxConfig is null) return;
         var existing = _boxes.FirstOrDefault(box => box.Config.Id == boxConfig.Id);
@@ -1413,6 +1438,11 @@ public partial class App : Application
     {
         switch (command)
         {
+            case "launcher":
+                if (_launcherMode) OpenLauncher();
+                else ShowSettings();
+                break;
+
             case "arrange":
                 ArrangeBoxes();
                 break;
@@ -1431,6 +1461,10 @@ public partial class App : Application
 
             case "toggleicons":
                 ToggleIconsFromUser();
+                break;
+
+            case "toggletaskbar":
+                if (_launcherMode) ToggleLauncherTaskbar();
                 break;
 
             case "settings":
@@ -1531,7 +1565,8 @@ public partial class App : Application
         {
             if (!isStartup)
             {
-                ShowSettings();
+                if (_launcherMode && !args.Contains("--settings", StringComparer.OrdinalIgnoreCase)) OpenLauncher();
+                else ShowSettings();
             }
 
             return;
@@ -1642,6 +1677,7 @@ public partial class App : Application
 
         _config.LastOrganize = result.Moves;
         _config.LastOrganizeTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        if (_launcherMode) LauncherConfigChanged();
         UpdateDesktopPresentation();
         RequestDesktopScan();
         ConfigStore.Save(_config);
@@ -1683,6 +1719,11 @@ public partial class App : Application
         }
 
         var restored = VirtualGroups.Undo(_config, _config.LastOrganize);
+        if (_launcherMode)
+        {
+            LauncherConfigChanged();
+            RequestLauncherScan();
+        }
         UpdateDesktopPresentation();
         RequestDesktopScan();
         if (_config.LastOrganize.Count == 0) _config.LastOrganizeTime = string.Empty;
@@ -1766,7 +1807,7 @@ public partial class App : Application
     {
         if (_settings is null)
         {
-            _settings = new SettingsWindow(_config);
+            _settings = new SettingsWindow(_config, _launcherMode);
             _settings.Applied += (_, _) =>
             {
                 ApplyConfig();
@@ -1828,7 +1869,7 @@ public partial class App : Application
         _taskbar?.Dispose();
         SaveDesktopSnapshot();
 
-        if (_config.RestoreIconsOnExit && _config.IconsHiddenByApp)
+        if (!_launcherMode && _config.RestoreIconsOnExit && _config.IconsHiddenByApp)
         {
             _shell.SetIconsVisible(true);
             _config.IconsHiddenByApp = false;
@@ -1845,6 +1886,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        StopLauncher();
         _folderRecoveryTimer?.Stop();
         _updateTimer?.Stop();
         _updates.Dispose();
@@ -1873,16 +1915,18 @@ public partial class App : Application
             return;
         }
 
-        _tray.ItemToggleIcons.Text = _config.IconsHiddenByApp ? "显示桌面图标" : "隐藏桌面图标";
+        _tray.ItemToggleIcons.Text = _launcherMode
+            ? (_launcherTaskbarHidden ? "显示任务栏" : "隐藏任务栏")
+            : (_config.IconsHiddenByApp ? "显示桌面图标" : "隐藏桌面图标");
         _tray.ItemUndo.Enabled = _config.LastOrganize.Count > 0;
-        _tray.ItemBoxRoot.Text = $"打开分组配置文件夹（{_boxes.Count} 个分组）";
+        _tray.ItemBoxRoot.Text = $"打开分组配置文件夹（{(_launcherMode ? _config.Boxes.Count : _boxes.Count)} 个分组）";
     }
 
     private void ApplyConfig()
     {
         ThemeManager.Apply(_config.Theme);
         _tray?.ApplyTheme();
-        SyncTaskbarVisibility();
+        if (!_launcherMode) SyncTaskbarVisibility();
 
         if (_mouseWatcher is not null)
         {
@@ -1891,7 +1935,12 @@ public partial class App : Application
 
         var hiddenFilesChanged = _config.ShowHiddenFiles != _lastShowHiddenFiles;
         _lastShowHiddenFiles = _config.ShowHiddenFiles;
-        if (hiddenFilesChanged) RequestDesktopScan();
+        if (hiddenFilesChanged)
+        {
+            if (_launcherMode) RequestLauncherScan();
+            else RequestDesktopScan();
+        }
+        if (_launcherMode) _launcher?.RefreshAppearance();
 
         foreach (var box in _boxes)
         {
