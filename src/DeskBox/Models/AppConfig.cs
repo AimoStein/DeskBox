@@ -65,6 +65,11 @@ public sealed class GroupEntry
 
 public sealed class AppConfig
 {
+    internal const int DefaultLauncherIconSize = 49;
+    internal const int DefaultLauncherLayerGap = 18;
+    internal const int MinimumLauncherLayerGap = 4;
+    internal const int MaximumLauncherLayerGap = 32;
+
     public int Version { get; set; } = 2;
 
     /// <summary>盒子内容存放的根目录，默认「桌面\桌面整理」。</summary>
@@ -73,6 +78,8 @@ public sealed class AppConfig
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public double BoxOpacity { get; set; } = 0.35;
     public double IconSize { get; set; } = 37;
+    public int LauncherIconSize { get; set; } = DefaultLauncherIconSize;
+    public int LauncherLayerGap { get; set; } = DefaultLauncherLayerGap;
     public double CornerRadius { get; set; } = 22;
     public bool LiquidGlassEnabled { get; set; } = true;
     public double GlassBlur { get; set; } = 0;
@@ -284,6 +291,8 @@ public static class ConfigStore
 
         cfg.BoxOpacity = double.IsFinite(cfg.BoxOpacity) ? Math.Clamp(cfg.BoxOpacity, 0, 1.0) : 0.35;
         cfg.IconSize = Math.Clamp(cfg.IconSize, 32, 96);
+        cfg.LauncherIconSize = Math.Clamp(cfg.LauncherIconSize, 32, 96);
+        cfg.LauncherLayerGap = Math.Clamp(cfg.LauncherLayerGap, AppConfig.MinimumLauncherLayerGap, AppConfig.MaximumLauncherLayerGap);
         cfg.CornerRadius = double.IsFinite(cfg.CornerRadius) ? Math.Clamp(cfg.CornerRadius, 10, 100) : 22;
         cfg.GlassBlur = double.IsFinite(cfg.GlassBlur) ? Math.Clamp(cfg.GlassBlur, 0, 16) : 0;
         cfg.GlassRefraction = double.IsFinite(cfg.GlassRefraction) ? Math.Clamp(cfg.GlassRefraction, 0, 80) : 28;

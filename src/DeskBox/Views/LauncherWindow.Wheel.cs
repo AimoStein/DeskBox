@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -13,8 +14,9 @@ internal partial class LauncherWindow
     private IReadOnlyList<LaunchSection> _wheelSections = Array.Empty<LaunchSection>();
     private IReadOnlyList<LaunchEntry> _dockEntries = Array.Empty<LaunchEntry>();
     private Size _wheelSize;
-    private double _wheelIconSize;
-    private double _dockIconSize;
+    private int _wheelIconSize;
+    private int _wheelLayerGap;
+    private int _dockIconSize;
     private Canvas? _wheelFrame;
     private Grid? _searchHub;
     private (Point Center, double Radius) _hubPosition;
@@ -22,22 +24,24 @@ internal partial class LauncherWindow
     private void RenderOverview()
     {
         if (OverviewPanel.Visibility != Visibility.Visible) return;
-        var size = Overview.RenderSize;
+        var size = OverviewPanel.RenderSize;
         if (size.Width < 90 || size.Height < 90) return;
         var sections = _sections.Where(section => section.Group is not null).ToArray();
-        if (size == _wheelSize && _config.IconSize == _wheelIconSize && SameSections(_wheelSections, sections)) return;
-        var titles = sections.Select(BuildSectorTitle).ToArray();
-        foreach (var title in titles) title.Measure(new Size(120, 26));
-        var pitch = Math.Clamp(_config.IconSize + 47, 80, 116);
-        var layout = LauncherWheelLayout.Arrange(size, sections.Select(section => section.Items.Count).ToArray(), pitch,
-            titles.Select(title => title.DesiredSize).ToArray(), _config.IconSize);
+        if (size == _wheelSize && _config.LauncherIconSize == _wheelIconSize &&
+            _config.LauncherLayerGap == _wheelLayerGap && SameSections(_wheelSections, sections)) return;
+        var titles = new Button[sections.Length];
+        var labels = sections.Select(section => section.Items.Select(item => CreateTileLabel(item.Name, compact: true)).ToArray()).ToArray();
+        var labelSizes = labels.Select(row => row.Select(MeasureCompactLabel).ToArray()).ToArray();
+        var layout = LauncherWheelLayout.Arrange(size, sections.Select(section => section.Items.Count).ToArray(),
+            _config.LauncherIconSize, _config.LauncherLayerGap, MeasureTitle, labelSizes);
         if (layout.Radius < 45) return;
-        var frame = new Canvas { Width = size.Width, Height = size.Height };
+        var frame = new Canvas { Width = layout.CanvasSize.Width, Height = layout.CanvasSize.Height };
         for (var i = 0; i < layout.Sectors.Count; i++)
         {
             var sector = layout.Sectors[i];
-            AddSector(frame, sections[i], layout, sector);
+            AddSector(frame, sections[i], layout, sector, labels[i], labelSizes[i]);
             titles[i].Width = sector.Title.Width;
+            titles[i].Height = sector.Title.Height;
             Place(frame, titles[i], sector.Title.TopLeft);
         }
         var hubPosition = (layout.Center, layout.HubRadius);
@@ -48,26 +52,61 @@ internal partial class LauncherWindow
             _hubPosition = hubPosition;
         }
         if (_wheelFrame is not null) Overview.Children.Remove(_wheelFrame);
+        OverviewSurface.Width = layout.CanvasSize.Width;
+        OverviewSurface.Height = layout.CanvasSize.Height;
         Overview.Children.Add(frame);
         _wheelFrame = frame;
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (_wheelFrame != frame) return;
+            OverviewScroll.ScrollToHorizontalOffset(OverviewScroll.ScrollableWidth / 2);
+            OverviewScroll.ScrollToVerticalOffset(OverviewScroll.ScrollableHeight / 2);
+        }));
         _wheelSize = size;
-        _wheelIconSize = _config.IconSize;
+        _wheelIconSize = _config.LauncherIconSize;
+        _wheelLayerGap = _config.LauncherLayerGap;
         _wheelSections = sections;
+
+        Size MeasureTitle(int index, bool vertical)
+        {
+            var title = BuildSectorTitle(sections[index], vertical);
+            title.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            titles[index] = title;
+            return title.DesiredSize;
+        }
     }
 
-    private Button BuildSectorTitle(LaunchSection section)
+    private Button BuildSectorTitle(LaunchSection section, bool vertical)
     {
-        var title = PanelButton(new TextBlock
+        var label = new TextBlock
         {
             Text = section.Name, TextTrimming = TextTrimming.CharacterEllipsis,
-            FontWeight = FontWeights.SemiBold, FontSize = 14,
-        });
+            FontWeight = FontWeights.SemiBold, FontSize = 14, TextAlignment = TextAlignment.Center,
+        };
+        var title = PanelButton(label);
         title.MaxWidth = 120;
-        title.Height = 26;
-        title.Padding = new Thickness(10, 0, 10, 0);
+        if (vertical)
+        {
+            var name = new StringInfo(section.Name);
+            const int maxLines = 6;
+            var lines = Enumerable.Range(0, Math.Min(name.LengthInTextElements, maxLines))
+                .Select(index => index == maxLines - 1 && name.LengthInTextElements > maxLines
+                    ? "⋮"
+                    : name.SubstringByTextElements(index, 1));
+            label.Text = string.Join("\n", lines);
+            label.LineHeight = 16;
+            label.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+            title.Padding = new Thickness(5, 4, 5, 4);
+        }
+        else
+        {
+            title.Height = 26;
+            title.Padding = new Thickness(10, 0, 10, 0);
+        }
         title.Background = PlateBrush;
         title.BorderBrush = RimBrush;
         title.ToolTip = section.Name;
+        System.Windows.Automation.AutomationProperties.SetName(title, section.Name);
         title.Click += (_, _) => ShowSection(Id(section));
         if (section.Group is { IsVirtual: true } group)
         {
@@ -77,7 +116,8 @@ internal partial class LauncherWindow
         return title;
     }
 
-    private void AddSector(Canvas frame, LaunchSection section, LauncherWheelLayout.Layout layout, LauncherWheelLayout.Sector sector)
+    private void AddSector(Canvas frame, LaunchSection section, LauncherWheelLayout.Layout layout, LauncherWheelLayout.Sector sector,
+        IReadOnlyList<TextBlock> labels, IReadOnlyList<Size> labelSizes)
     {
         var bounds = sector.Shape.Bounds;
         var offset = (Vector)bounds.TopLeft;
@@ -112,28 +152,13 @@ internal partial class LauncherWindow
             area.ContextMenu = menu;
         }
         var size = layout.TileSize;
-        var overflow = sector.Slots.Count < section.Items.Count;
         for (var i = 0; i < sector.Slots.Count; i++)
         {
-            Button tile;
-            var anchor = layout.IconAnchor;
-            if (overflow && i == sector.Slots.Count - 1)
-            {
-                tile = PanelButton($"+{section.Items.Count - i}");
-                tile.Width = size.Width;
-                tile.Height = size.Height;
-                tile.Padding = new Thickness(0);
-                tile.ToolTip = "打开完整分组";
-                tile.Click += (_, _) => ShowSection(Id(section));
-                anchor = size.Height / 2;
-            }
-            else
-            {
-                var item = section.Items[i];
-                tile = BuildTile(item, size);
-                if (section.Group is { IsVirtual: true } tileGroup) WireDrop(tile, tileGroup);
-            }
-            Place(content, tile, sector.Slots[i] - offset - new Vector(size.Width / 2, anchor));
+            var origin = sector.Slots[i] - offset - new Vector(size.Width / 2, layout.IconAnchor);
+            var tile = BuildTile(section.Items[i], compact: true, preparedLabel: labels[i]);
+            tile.Clip = LauncherWheelLayout.CompactTileClip(_config.LauncherIconSize, labelSizes[i]);
+            if (section.Group is { IsVirtual: true } tileGroup) WireDrop(tile, tileGroup);
+            Place(content, tile, origin);
         }
     }
 
@@ -160,12 +185,19 @@ internal partial class LauncherWindow
     {
         var shape = new EllipseGeometry(new Point(radius, radius), radius, radius);
         var glyph = Geometry.Parse("M 21,12 A 9,9 0 1 1 3,12 A 9,9 0 1 1 21,12 M 19,19 L 27,27").Clone();
-        glyph.Transform = new TranslateTransform(radius - 15, radius - 15);
+        glyph.Transform = new TransformGroup
+        {
+            Children = new TransformCollection
+            {
+                new ScaleTransform(0.85, 0.85, 15, 15),
+                new TranslateTransform(radius - 15, radius - 15),
+            },
+        };
         var drawing = new DrawingGroup();
         using (var context = drawing.Open())
         {
             context.DrawGeometry(PlateBrush, new Pen(RimBrush, 2), shape);
-            context.DrawGeometry(null, new Pen(TextBrush, 2.4) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round }, glyph);
+            context.DrawGeometry(null, new Pen(TextBrush, 2.1) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round }, glyph);
         }
         var brush = new DrawingBrush(drawing)
         {
@@ -188,11 +220,13 @@ internal partial class LauncherWindow
     private void RenderDock()
     {
         var entries = _sections.FirstOrDefault(section => Id(section) == "desktop")?.Items ?? Array.Empty<LaunchEntry>();
-        if (_dockIconSize == _config.IconSize && _dockEntries.SequenceEqual(entries)) return;
-        var tiles = entries.Select(item => BuildTile(item, new Size(74, 72))).ToArray();
+        if (_dockIconSize == _config.LauncherIconSize && _dockEntries.SequenceEqual(entries)) return;
+        var tiles = entries.Select(item => BuildTile(item, compact: true)).ToArray();
+        var dockHeight = entries.Count == 0 ? 84 : Math.Max(84, LauncherWheelLayout.CompactTileSize(_config.LauncherIconSize).Height + 12);
+        DockRow.Height = new GridLength(dockHeight);
         DockIcons.Children.Clear();
         foreach (var tile in tiles) DockIcons.Children.Add(tile);
-        _dockIconSize = _config.IconSize;
+        _dockIconSize = _config.LauncherIconSize;
         _dockEntries = entries;
     }
 

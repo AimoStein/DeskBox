@@ -22,7 +22,7 @@
                         <Grid Background="Transparent" Margin="1,1">
                             <Track x:Name="PART_Track" IsDirectionReversed="True">
                                 <Track.DecreaseRepeatButton>
-                                    <RepeatButton Command="ScrollBar.PageUpCommand" Style="{StaticResource ScrollPage}" />
+                                    <RepeatButton x:Name="PageBefore" Command="ScrollBar.PageUpCommand" Style="{StaticResource ScrollPage}" />
                                 </Track.DecreaseRepeatButton>
                                 <Track.Thumb>
                                     <Thumb>
@@ -39,15 +39,31 @@
                                     </Thumb>
                                 </Track.Thumb>
                                 <Track.IncreaseRepeatButton>
-                                    <RepeatButton Command="ScrollBar.PageDownCommand" Style="{StaticResource ScrollPage}" />
+                                    <RepeatButton x:Name="PageAfter" Command="ScrollBar.PageDownCommand" Style="{StaticResource ScrollPage}" />
                                 </Track.IncreaseRepeatButton>
                             </Track>
                         </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Orientation" Value="Horizontal">
+                                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False" />
+                                <Setter TargetName="PageBefore" Property="Command" Value="ScrollBar.PageLeftCommand" />
+                                <Setter TargetName="PageAfter" Property="Command" Value="ScrollBar.PageRightCommand" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto" />
+                    <Setter Property="Height" Value="8" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
         <Style x:Key="PanelButton" TargetType="Button">
+            <Style.Resources>
+                <SolidColorBrush x:Key="PanelButtonHoverBrush" Color="#32B5CDE0" />
+            </Style.Resources>
             <Setter Property="Foreground" Value="#FFF1F4F7" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
@@ -63,7 +79,7 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Plate" Property="Background" Value="#32B5CDE0" />
+                                <Setter TargetName="Plate" Property="Background" Value="{DynamicResource PanelButtonHoverBrush}" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocused" Value="True">
                                 <Setter TargetName="Plate" Property="BorderBrush" Value="#A8BFD1" />
@@ -75,6 +91,11 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+        </Style>
+        <Style x:Key="LauncherTile" TargetType="Button" BasedOn="{StaticResource PanelButton}">
+            <Style.Resources>
+                <SolidColorBrush x:Key="PanelButtonHoverBrush" Color="Transparent" />
+            </Style.Resources>
         </Style>
     </Window.Resources>
     <Grid>
@@ -92,12 +113,17 @@
         <Grid Margin="12">
             <Grid.RowDefinitions>
                 <RowDefinition Height="*" />
-                <RowDefinition Height="84" />
+                <RowDefinition x:Name="DockRow" Height="84" />
             </Grid.RowDefinitions>
             <Grid x:Name="MainArea">
                 <Grid x:Name="OverviewPanel">
-                    <Canvas x:Name="Overview" />
-                    <Canvas x:Name="OverviewSearch" />
+                    <ScrollViewer x:Name="OverviewScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                                  PanningMode="Both" AutomationProperties.Name="分组轮盘">
+                        <Grid x:Name="OverviewSurface">
+                            <Canvas x:Name="Overview" />
+                            <Canvas x:Name="OverviewSearch" />
+                        </Grid>
+                    </ScrollViewer>
                 </Grid>
                 <Grid x:Name="Detail" Visibility="Collapsed">
                     <Grid x:Name="DetailPlate" IsHitTestVisible="False" />

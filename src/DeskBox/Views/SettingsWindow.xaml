@@ -451,6 +451,16 @@
                                                 <Slider x:Name="SlIcon" Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="32" Maximum="96" ValueChanged="Slider_ValueChanged" AutomationProperties.Name="图标大小" />
                                                 <TextBlock x:Name="LblIcon" Grid.Column="2" Style="{StaticResource ValueLabel}" />
                                             </Grid>
+                                            <Grid x:Name="LauncherLayerGapRow" Margin="0,0,0,18" Visibility="Collapsed">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="77" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="40" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="层间距" Style="{StaticResource RowLabel}" />
+                                                <Slider x:Name="SlLauncherLayerGap" Grid.Column="1" Style="{StaticResource FlatSlider}" ValueChanged="Slider_ValueChanged" AutomationProperties.Name="层间距" />
+                                                <TextBlock x:Name="LblLauncherLayerGap" Grid.Column="2" Style="{StaticResource ValueLabel}" />
+                                            </Grid>
                                             <Grid Margin="0,0,0,5">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*" />

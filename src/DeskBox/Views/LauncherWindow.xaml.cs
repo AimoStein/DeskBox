@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using DeskBox.Interop;
 using DeskBox.Models;
 using DeskBox.Rendering;
@@ -49,7 +50,15 @@ internal partial class LauncherWindow : Window
         ShowInTaskbar = preview;
         SceneHost.Clip = Geometry.Empty;
         Search.TextChanged += (_, _) => Render();
-        Overview.SizeChanged += (_, _) => RenderOverview();
+        OverviewPanel.SizeChanged += (_, _) => RenderOverview();
+        OverviewScroll.ScrollChanged += (_, _) => AlignBackgroundLayers();
+        OverviewScroll.PreviewMouseWheel += (_, e) =>
+        {
+            if (OverviewScroll.ScrollableWidth <= 0 ||
+                (OverviewScroll.ScrollableHeight > 0 && (Keyboard.Modifiers & ModifierKeys.Shift) == 0)) return;
+            OverviewScroll.ScrollToHorizontalOffset(OverviewScroll.HorizontalOffset - e.Delta);
+            e.Handled = true;
+        };
         MainArea.SizeChanged += (_, _) => SizeDetail();
         DockPlate.SizeChanged += (_, _) => SizeDock();
         UngroupedButton.Click += (_, _) => ShowSection("desktop");
@@ -159,8 +168,9 @@ internal partial class LauncherWindow : Window
 
     private static (int Width, int Height) MeasureLauncher(int width, int height, double scale)
     {
-        var diameter = Math.Min(1480, Math.Min(width * 0.97 / scale - 24, height * 0.99 / scale - 108));
-        return ((int)Math.Round((diameter + 24) * scale), (int)Math.Round((diameter + 108) * scale));
+        var diameter = Math.Min(1600, Math.Min(width / scale - 24, height / scale - 108));
+        var launcherWidth = Math.Min(width, (int)Math.Round((diameter + 136) * scale));
+        return (launcherWidth, (int)Math.Round((diameter + 108) * scale));
     }
 
     private static void PlaceWindow(Window window, int x, int y, int width, int height, double scale)
@@ -314,31 +324,50 @@ internal partial class LauncherWindow : Window
         parent.Children.Add(layer);
     }
 
-    private Button BuildTile(LaunchEntry item, Size? compact = null)
+    private TextBlock CreateTileLabel(string name, bool compact)
     {
-        var size = compact is { } bounds
-            ? LauncherWheelLayout.CompactIconSize(bounds, _config.IconSize)
-            : Math.Clamp((int)_config.IconSize + 8, 40, 96);
-        var image = new Image { Width = size, Height = size, Source = IconCache.TryGetFast(item.Path, size) ?? IconCache.Placeholder(size) };
-        var stack = new StackPanel();
-        stack.Children.Add(image);
         var label = new TextBlock
         {
-            Text = item.Name, FontSize = compact is null ? 11.5 : 11, TextAlignment = TextAlignment.Center,
-            TextWrapping = compact is null ? TextWrapping.Wrap : TextWrapping.NoWrap,
-            TextTrimming = TextTrimming.CharacterEllipsis, MaxHeight = 32,
-            Margin = new Thickness(0, compact is null ? 4 : LauncherWheelLayout.CompactLabelGap, 0, 0),
+            Text = name, FontFamily = FontFamily, FontSize = compact ? 11 : 11.5, TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxHeight = compact ? LauncherWheelLayout.CompactLabelMaxHeight : 32,
+            Margin = new Thickness(0, compact ? LauncherWheelLayout.CompactLabelGap : 4, 0, 0),
         };
-        if (compact is not null)
+        if (compact)
         {
+            label.MaxWidth = LauncherWheelLayout.CompactTileSize(_config.LauncherIconSize).Width - 2 * LauncherWheelLayout.CompactHorizontalInset;
             label.LineHeight = LauncherWheelLayout.CompactLabelHeight;
             label.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
         }
-        stack.Children.Add(label);
-        var tile = PanelButton(stack);
-        tile.Width = compact?.Width ?? Math.Max(76, size + 20);
-        tile.Height = compact?.Height ?? size + 48;
-        tile.Padding = compact is null ? new Thickness(3, 5, 3, 3) : new Thickness(2, 1, 2, 1);
+        return label;
+    }
+
+    private static Size MeasureCompactLabel(TextBlock label)
+    {
+        label.Measure(new Size(label.MaxWidth, double.PositiveInfinity));
+        return new Size(label.DesiredSize.Width, Math.Max(0, label.DesiredSize.Height - label.Margin.Top));
+    }
+
+    private Button BuildTile(LaunchEntry item, bool compact = false, TextBlock? preparedLabel = null)
+    {
+        var size = _config.LauncherIconSize;
+        var bounds = LauncherWheelLayout.CompactTileSize(size);
+        var scale = new ScaleTransform(1, 1);
+        var image = new Image
+        {
+            Width = size, Height = size,
+            Source = IconCache.TryGetFast(item.Path, size) ?? IconCache.Placeholder(size),
+            RenderTransform = scale, RenderTransformOrigin = new Point(0.5, 1),
+        };
+        var stack = new StackPanel();
+        stack.Children.Add(image);
+        stack.Children.Add(preparedLabel ?? CreateTileLabel(item.Name, compact));
+        var tile = new Button { Content = stack, Style = (Style)FindResource("LauncherTile") };
+        tile.MouseEnter += (_, _) => AnimateIcon(1 + LauncherWheelLayout.IconHoverGrowth(size) / size);
+        tile.MouseLeave += (_, _) => AnimateIcon(1);
+        tile.Width = compact ? bounds.Width : Math.Max(90, size + 20);
+        tile.Height = compact ? bounds.Height : size + 48;
+        tile.Padding = compact ? new Thickness(2, 1, 2, 1) : new Thickness(3, 5, 3, 3);
         tile.VerticalContentAlignment = VerticalAlignment.Top;
         var description = item.Name + "\n" + item.Path;
         tile.ToolTip = description;
@@ -376,6 +405,16 @@ internal partial class LauncherWindow : Window
         tile.ContextMenuOpening += (_, _) => tile.ContextMenu = EntryMenu(item);
         tile.ContextMenu = new ContextMenu();
         return tile;
+
+        void AnimateIcon(double targetScale)
+        {
+            var animation = new DoubleAnimation(scale.ScaleX, targetScale, TimeSpan.FromMilliseconds(150))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, animation);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, animation);
+        }
     }
 
     private ContextMenu EntryMenu(LaunchEntry item)

@@ -36,6 +36,9 @@ public partial class SettingsWindow : Window
             LauncherColorCard.Visibility = Visibility.Visible;
             LauncherWinKeyRow.Visibility = Visibility.Visible;
             LauncherStartButtonRow.Visibility = Visibility.Visible;
+            LauncherLayerGapRow.Visibility = Visibility.Visible;
+            SlLauncherLayerGap.Minimum = AppConfig.MinimumLauncherLayerGap;
+            SlLauncherLayerGap.Maximum = AppConfig.MaximumLauncherLayerGap;
             BoxIconHint.Visibility = Visibility.Collapsed;
             ThemeLabel.Text = "设置主题";
             IconCardTitle.Text = "面板图标";
@@ -142,11 +145,13 @@ public partial class SettingsWindow : Window
             PillSystem.IsChecked = _config.Theme == ThemeMode.System;
 
             SlOpacity.Value = Math.Round(_config.BoxOpacity * 100);
-            SlIcon.Value = _config.IconSize;
+            SlIcon.Value = _launcherMode ? _config.LauncherIconSize : _config.IconSize;
+            SlLauncherLayerGap.Value = _config.LauncherLayerGap;
             SlRadius.Value = _config.CornerRadius;
 
             LblOpacity.Text = $"{SlOpacity.Value:0}%";
             LblIcon.Text = $"{SlIcon.Value:0} px";
+            LblLauncherLayerGap.Text = $"{SlLauncherLayerGap.Value:0} px";
             LblRadius.Text = $"{SlRadius.Value:0} px";
             SlBackgroundBrightness.Value = _config.LauncherBackgroundBrightness;
             SlBackgroundHue.Value = _config.LauncherBackgroundHue;
@@ -268,17 +273,23 @@ public partial class SettingsWindow : Window
 
     private void Slider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_loading || LblOpacity is null || LblIcon is null || LblRadius is null)
+        if (_loading)
         {
             return;
         }
 
         LblOpacity.Text = $"{SlOpacity.Value:0}%";
         LblIcon.Text = $"{SlIcon.Value:0} px";
+        LblLauncherLayerGap.Text = $"{SlLauncherLayerGap.Value:0} px";
         LblRadius.Text = $"{SlRadius.Value:0} px";
 
         _config.BoxOpacity = SlOpacity.Value / 100.0;
-        _config.IconSize = Math.Round(SlIcon.Value);
+        if (_launcherMode)
+        {
+            _config.LauncherIconSize = (int)Math.Round(SlIcon.Value);
+            _config.LauncherLayerGap = (int)Math.Round(SlLauncherLayerGap.Value);
+        }
+        else _config.IconSize = Math.Round(SlIcon.Value);
         _config.CornerRadius = Math.Round(SlRadius.Value);
 
         Applied?.Invoke(this, EventArgs.Empty);
@@ -351,7 +362,7 @@ public partial class SettingsWindow : Window
             "organize" => ("整理", "按类型归类桌面文件，也可以随时撤销上次整理。"),
             "general" => ("常规", "管理启动方式与本地数据。"),
             "updates" => ("版本更新", "获取最新功能与改进，保留熟悉的桌面布局。"),
-            _ => ("图标", _launcherMode ? "调整面板图标大小和隐藏文件的显示。" : "调整盒内图标大小与桌面图标的显示方式。"),
+            _ => ("图标", _launcherMode ? "调整面板图标大小、轮盘层间距和隐藏文件的显示。" : "调整盒内图标大小与桌面图标的显示方式。"),
         };
         Scroller.ScrollToTop();
     }
