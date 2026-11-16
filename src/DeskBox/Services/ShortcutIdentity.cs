@@ -9,6 +9,10 @@ namespace DeskBox.Services;
 
 internal sealed record ShortcutIdentity(string Key, string? UpgradeKey, bool CanLaunch)
 {
+    internal string? Target { get; init; }
+    internal string? Arguments { get; init; }
+    internal string? AppId { get; init; }
+
     private static readonly Regex VersionDirectory = new(
         @"(?<=\\)(?:APP-)?[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?(?=\\|$)",
         RegexOptions.CultureInvariant);
@@ -55,7 +59,8 @@ internal sealed record ShortcutIdentity(string Key, string? UpgradeKey, bool Can
                 var upgradeKey = appId is null
                     ? VersionedKey(command, args.ToString(), workingDirectory)
                     : JsonSerializer.Serialize(new[] { "app", appId, args.ToString(), VersionDirectory.Replace(workingDirectory, "{VERSION}") });
-                return new(key, upgradeKey, launchable);
+                return new(key, upgradeKey, launchable)
+                    { Target = command, Arguments = args.ToString(), AppId = appId };
             }
             finally { Marshal.ReleaseComObject(link); }
         }

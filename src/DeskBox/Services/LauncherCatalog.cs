@@ -6,6 +6,8 @@ namespace DeskBox.Services;
 
 internal sealed record LaunchEntry(string Path, string Name)
 {
+    internal string OriginalName { get; init; } = Name;
+
     internal static LaunchEntry FromPath(string path, string? label = null) =>
         new(path, string.IsNullOrWhiteSpace(label) ? NameOf(path) : label);
 
@@ -137,6 +139,28 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
             .ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(item => item.Path, StringComparer.OrdinalIgnoreCase);
 
+    private static LaunchEntry WithDisplayName(LaunchEntry item, AppConfig config) =>
+        config.LauncherDisplayNames.TryGetValue(item.Path, out var name) ? item with { Name = name } : item;
+
+    internal static IReadOnlyList<LaunchEntry> ExcludeGroupedApps(IReadOnlyList<LaunchEntry> apps,
+        IEnumerable<LaunchSection> sections)
+    {
+        var grouped = sections.Where(section => section.Group is not null).SelectMany(section => section.Items)
+            .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (grouped.Length == 0) return apps;
+
+        var groupedPaths = grouped.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var identities = grouped.Select(item => (item.OriginalName, Identity: LauncherAppIdentity.Read(item.Path))).ToArray();
+        return apps.Where(app =>
+        {
+            if (groupedPaths.Contains(app.Path)) return false;
+            var identity = LauncherAppIdentity.Read(app.Path);
+            return !identities.Any(group => group.Identity.Matches(identity) ||
+                (string.Equals(group.OriginalName, app.OriginalName, StringComparison.CurrentCultureIgnoreCase) &&
+                    group.Identity.MatchesNamedLauncher(identity)));
+        }).ToArray();
+    }
+
     internal IReadOnlyList<LaunchSection> Sections(AppConfig config)
     {
         var sections = new List<LaunchSection>();
@@ -153,14 +177,19 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
             var groupPaths = entries.Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             entries.RemoveAll(entry => LaunchEntry.MissingLinkRewriteSource(entry.Path) is { } source &&
                 groupPaths.Contains(source) && File.Exists(source));
-            sections.Add(new LaunchSection(box, box.Title, OrderByUsage(entries, config).ToArray()));
+            sections.Add(new LaunchSection(box, box.Title, SortEntries(entries)));
         }
-        sections.Add(new LaunchSection(null, "未分组",
-            OrderByUsage(Desktop.Where(item => !assigned.Contains(item.Path)), config).ToArray()));
-        var known = assigned.Concat(Desktop.Select(item => item.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        sections.Add(new LaunchSection(null, "已安装应用",
-            OrderByUsage(Installed.Where(item => !known.Contains(item.Path)), config).ToArray()));
+        var ungrouped = Desktop.Concat(config.LauncherUngroupedEntries
+                .Where(entry => !string.IsNullOrWhiteSpace(entry.Path))
+                .Select(entry => LaunchEntry.FromPath(entry.Path, entry.DisplayName)))
+            .Where(item => !assigned.Contains(item.Path))
+            .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        sections.Add(new LaunchSection(null, "未分组", SortEntries(ungrouped)));
+        sections.Add(new LaunchSection(null, "所有应用", SortEntries(Installed)));
         return sections;
+
+        LaunchEntry[] SortEntries(IEnumerable<LaunchEntry> items) =>
+            OrderByUsage(items.Select(item => WithDisplayName(item, config)), config).ToArray();
     }
 
     private static List<LaunchEntry> ReadLegacyBox(BoxConfig box, AppConfig config)

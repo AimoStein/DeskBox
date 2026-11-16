@@ -89,6 +89,9 @@ public sealed class AppConfig
     public int LauncherBackgroundSaturation { get; set; } = 100;
     public bool LauncherInterceptWinKey { get; set; } = true;
     public bool LauncherInterceptStartButton { get; set; } = true;
+    public bool LauncherHideGroupedApps { get; set; }
+    public List<GroupEntry> LauncherUngroupedEntries { get; set; } = new();
+    public Dictionary<string, string> LauncherDisplayNames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, long> LauncherOpenCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     internal void RecordLauncherOpen(string path)
@@ -275,6 +278,13 @@ public static class ConfigStore
     private static void Normalize(AppConfig cfg)
     {
         cfg.Boxes ??= new List<BoxConfig>();
+        cfg.LauncherUngroupedEntries ??= new List<GroupEntry>();
+        var displayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (cfg.LauncherDisplayNames is not null)
+            foreach (var (path, name) in cfg.LauncherDisplayNames)
+                if (!string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(name))
+                    displayNames[path] = name;
+        cfg.LauncherDisplayNames = displayNames;
         cfg.ShortcutAliases = new Dictionary<string, string>(cfg.ShortcutAliases ?? new(), StringComparer.Ordinal);
         var openCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         if (cfg.LauncherOpenCounts is not null)

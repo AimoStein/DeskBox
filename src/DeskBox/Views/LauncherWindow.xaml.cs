@@ -2,10 +2,12 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using DeskBox.Interop;
 using DeskBox.Models;
 using DeskBox.Rendering;
@@ -18,16 +20,25 @@ namespace DeskBox.Views;
 internal partial class LauncherWindow : Window
 {
     private const string EntryFormat = "DeskBox.LauncherEntry";
+    private const double TaskbarGap = 8;
+    internal const double PanelHorizontalSpace = 48; // Content margins and scrollbar gutter.
+    internal const double PanelVerticalSpace = 98; // Content margins and toolbar.
+    internal const double ScrollbarGutter = 16;
     private static readonly Brush TextBrush = MakeBrush(255, 241, 244, 247);
-    private static readonly Brush DimBrush = MakeBrush(255, 189, 201, 211);
-    private static readonly Brush CardBrush = MakeBrush(181, 27, 36, 46);
+    private static readonly Brush DimBrush = MakeBrush(255, 167, 177, 190);
+    private static readonly Brush CardBrush = MakeBrush(12, 218, 230, 249);
+    private static readonly Brush CardBorderBrush = MakeBrush(29, 218, 230, 249);
     private readonly AppConfig _config;
     private readonly bool _preview;
-    private readonly HashSet<LauncherBackgroundLayer> _backgroundLayers = new();
+    private readonly DispatcherTimer _scrollbarTimer = new() { Interval = TimeSpan.FromMilliseconds(650) };
     private IReadOnlyList<LaunchSection> _sections = Array.Empty<LaunchSection>();
+    private StackPanel? _groupsPage;
+    private ContextMenu? _openEntryMenu;
+    private TextBox? _nameEditor;
+    private Action<bool>? _finishRename;
+    private static readonly Lazy<string[]> ProgramsFolders = new(LauncherCatalog.ProgramsFolders);
     private LaunchEntry? _firstResult;
-    private string? _selected;
-    private bool _searching;
+    private BoxConfig? _groupToReveal;
     private bool _interacting;
     private bool _draggingEntries;
     private bool _sectionVisualsDirty;
@@ -35,7 +46,7 @@ internal partial class LauncherWindow : Window
     private LauncherColor? _backgroundColor;
     private SettingsWindow? _dockedSettings;
 
-    internal bool IsSessionActive => IsActive || _dockedSettings?.IsActive == true;
+    internal bool IsSessionActive => IsActive || _openEntryMenu is not null || _dockedSettings?.IsActive == true;
 
     internal event Action? ConfigChanged;
     internal event Action? UsageChanged;
@@ -48,52 +59,50 @@ internal partial class LauncherWindow : Window
         _preview = preview;
         InitializeComponent();
         ShowInTaskbar = preview;
-        SceneHost.Clip = Geometry.Empty;
-        Search.TextChanged += (_, _) => Render();
-        OverviewPanel.SizeChanged += (_, _) => RenderOverview();
-        OverviewScroll.ScrollChanged += (_, _) => AlignBackgroundLayers();
-        OverviewScroll.PreviewMouseWheel += (_, e) =>
+        PanelRoot.SizeChanged += (_, _) =>
         {
-            if (OverviewScroll.ScrollableWidth <= 0 ||
-                (OverviewScroll.ScrollableHeight > 0 && (Keyboard.Modifiers & ModifierKeys.Shift) == 0)) return;
-            OverviewScroll.ScrollToHorizontalOffset(OverviewScroll.HorizontalOffset - e.Delta);
-            e.Handled = true;
+            var bounds = new Rect(PanelRoot.RenderSize);
+            PanelRoot.Clip = new RectangleGeometry(bounds, 24, 24);
         };
-        MainArea.SizeChanged += (_, _) => SizeDetail();
-        DockPlate.SizeChanged += (_, _) => SizeDock();
-        UngroupedButton.Click += (_, _) => ShowSection("desktop");
-        AllApps.Click += (_, _) => ShowSection("installed");
-        Back.Click += (_, _) => ShowSection(null);
-        WireDrop(DockScroll, null);
-        DockScroll.PreviewMouseWheel += (_, e) =>
+        Search.TextChanged += (_, _) =>
         {
-            if (DockScroll.ScrollableWidth <= 0) return;
-            DockScroll.ScrollToHorizontalOffset(DockScroll.HorizontalOffset - e.Delta);
-            e.Handled = true;
+            ItemsScroll.ScrollToTop();
+            if (Search.Text.Trim().Length == 0) ResizeOverview();
+            Render();
         };
-        AddBackground(DockPlate);
-        AddBackground(DetailPlate);
+        ItemsScroll.SizeChanged += (_, _) => Render();
+        ItemsScroll.PreviewMouseWheel += OnOverviewMouseWheel;
+        ItemsScroll.ScrollChanged += OnScrollChanged;
+        _scrollbarTimer.Tick += (_, _) =>
+        {
+            if (ItemsScrollbar?.IsMouseCaptureWithin == true) return;
+            HideScrollbar(fade: true);
+        };
         SettingsButton.Click += (_, _) => SettingsRequested?.Invoke();
         AddGroup.Click += (_, _) => CreateGroup();
         PreviewKeyDown += OnKeyDown;
         PreviewTextInput += (_, e) =>
         {
-            if (_searching || string.IsNullOrWhiteSpace(e.Text) || e.Text.Any(char.IsControl)) return;
-            OpenSearch();
-            Search.Text = e.Text;
-            Search.CaretIndex = Search.Text.Length;
+            if (_nameEditor is not null || Search.IsKeyboardFocusWithin ||
+                string.IsNullOrWhiteSpace(e.Text) || e.Text.Any(char.IsControl)) return;
+            Search.Focus();
+            Search.SelectedText = e.Text;
+            Search.CaretIndex = Search.SelectionStart + Search.SelectionLength;
             e.Handled = true;
         };
         Deactivated += (_, _) => Dispatcher.BeginInvoke(() =>
         {
-            if (!preview && IsVisible && !IsActive && !_interacting && _dockedSettings is null) Hide();
+            if (!preview && IsVisible && !IsActive && !_interacting && _dockedSettings is null &&
+                _openEntryMenu is null) Hide();
         });
         IsVisibleChanged += (_, _) =>
         {
-            if (!IsVisible) _dockedSettings?.Close();
+            if (IsVisible) return;
+            HideScrollbar(fade: false);
+            ItemsScroll.ScrollToTop();
+            _finishRename?.Invoke(true);
+            _dockedSettings?.Close();
         };
-        LayoutUpdated += (_, _) => AlignBackgroundLayers();
-        ItemsScroll.ScrollChanged += (_, _) => AlignBackgroundLayers();
         ApplyBackgroundColor();
     }
 
@@ -102,25 +111,24 @@ internal partial class LauncherWindow : Window
         if (IsVisible)
         {
             Activate();
-            if (_searching) Search.Focus();
             return;
         }
         var foreground = NativeMethods.GetForegroundWindow();
-        if (anchor is { } point)
-        {
-            var screen = WinForms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y));
-            PositionCentered(screen, DpiScale(MonitorFromPoint(point, 2)));
-        }
+        if (anchor is null && foreground != IntPtr.Zero)
+            PositionNearTaskbar(WinForms.Screen.FromHandle(foreground), MonitorScale(foreground));
         else
         {
-            var screen = foreground == IntPtr.Zero
-                ? WinForms.Screen.FromPoint(WinForms.Cursor.Position) : WinForms.Screen.FromHandle(foreground);
-            PositionCentered(screen, MonitorScale(foreground));
+            var cursor = WinForms.Cursor.Position;
+            var point = anchor ?? new POINT(cursor.X, cursor.Y);
+            var screen = WinForms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y));
+            PositionNearTaskbar(screen, DpiScale(MonitorFromPoint(point, 2)));
         }
-        ShowSection(null);
+        Search.Clear();
+        ItemsScroll.ScrollToTop();
         Topmost = true;
         Show();
         Activate();
+        Keyboard.Focus(PanelRoot);
     }
 
     internal void DockSettings(SettingsWindow settings)
@@ -134,14 +142,20 @@ internal partial class LauncherWindow : Window
             if (!IsVisible) return;
             var launcherHandle = new WindowInteropHelper(this).Handle;
             if (launcherHandle == IntPtr.Zero) return;
-            PositionCentered(WinForms.Screen.FromHandle(launcherHandle), MonitorScale(launcherHandle));
+            PositionNearTaskbar(WinForms.Screen.FromHandle(launcherHandle), MonitorScale(launcherHandle));
             Topmost = true;
             Activate();
         };
 
-        ShowSection(null);
+        Search.Clear();
+        PositionDockedSettings(settings);
+    }
+
+    private void PositionDockedSettings(SettingsWindow settings)
+    {
         var handle = new WindowInteropHelper(this).Handle;
-        var area = WinForms.Screen.FromHandle(handle).WorkingArea;
+        var screen = WinForms.Screen.FromHandle(handle);
+        var area = screen.WorkingArea;
         var scale = MonitorScale(handle);
         var margin = (int)Math.Round(18 * scale);
         var gap = (int)Math.Round(24 * scale);
@@ -150,27 +164,71 @@ internal partial class LauncherWindow : Window
         var settingsWidth = (int)Math.Round(Math.Min(preferredSettingsWidth * scale, availableWidth * 0.52));
         var settingsHeight = Math.Min((int)Math.Round(920 * scale), area.Height - 2 * margin);
         var (width, height) = MeasureLauncher(availableWidth - settingsWidth, area.Height, scale);
-        var x = area.Left + (area.Width - width - gap - settingsWidth) / 2;
-        var y = area.Top + (area.Height - height) / 2;
-        var settingsY = Math.Max(area.Top + margin, area.Top + (area.Height - settingsHeight) / 2 - (int)(36 * scale));
+        var pairHeight = Math.Max(height, settingsHeight);
+        var origin = NearTaskbar(screen.Bounds, area, width + gap + settingsWidth, pairHeight, scale);
+        var alignBottom = TaskbarEdge(screen.Bounds, area) == Dock.Bottom;
         Topmost = false;
-        PlaceWindow(this, x, y, width, height, scale);
-        PlaceWindow(settings, x + width + gap, settingsY, settingsWidth, settingsHeight, scale);
+        PlaceWindow(this, origin.X, origin.Y + (alignBottom ? pairHeight - height : 0), width, height, scale);
+        PlaceWindow(settings, origin.X + width + gap, origin.Y + (alignBottom ? pairHeight - settingsHeight : 0),
+            settingsWidth, settingsHeight, scale);
     }
 
-    private void PositionCentered(WinForms.Screen screen, double scale)
+    private void PositionNearTaskbar(WinForms.Screen screen, double scale)
     {
         var area = screen.WorkingArea;
         var (width, height) = MeasureLauncher(area.Width, area.Height, scale);
-        PlaceWindow(this, area.Left + (area.Width - width) / 2, area.Top + (area.Height - height) / 2,
-            width, height, scale);
+        var origin = NearTaskbar(screen.Bounds, area, width, height, scale);
+        PlaceWindow(this, origin.X, origin.Y, width, height, scale);
     }
 
-    private static (int Width, int Height) MeasureLauncher(int width, int height, double scale)
+    internal static System.Drawing.Point NearTaskbar(System.Drawing.Rectangle bounds, System.Drawing.Rectangle work,
+        int width, int height, double scale)
     {
-        var diameter = Math.Min(1600, Math.Min(width / scale - 24, height / scale - 108));
-        var launcherWidth = Math.Min(width, (int)Math.Round((diameter + 136) * scale));
-        return (launcherWidth, (int)Math.Round((diameter + 108) * scale));
+        var gap = (int)Math.Round(TaskbarGap * scale);
+        var centerX = work.Left + (work.Width - width) / 2;
+        var centerY = work.Top + (work.Height - height) / 2;
+        return TaskbarEdge(bounds, work) switch
+        {
+            Dock.Top => new(centerX, work.Top + gap),
+            Dock.Left => new(work.Left + gap, centerY),
+            Dock.Right => new(work.Right - width - gap, centerY),
+            _ => new(centerX, work.Bottom - height - gap),
+        };
+    }
+
+    private static Dock TaskbarEdge(System.Drawing.Rectangle bounds, System.Drawing.Rectangle work)
+    {
+        var left = work.Left - bounds.Left;
+        var right = bounds.Right - work.Right;
+        var top = work.Top - bounds.Top;
+        var bottom = bounds.Bottom - work.Bottom;
+        var reserved = Math.Max(Math.Max(left, right), Math.Max(top, bottom));
+        if (reserved == bottom) return Dock.Bottom;
+        if (reserved == top) return Dock.Top;
+        return reserved == left ? Dock.Left : Dock.Right;
+    }
+
+    private (int Width, int Height) MeasureLauncher(int width, int height, double scale)
+    {
+        var margin = (int)Math.Round(18 * scale);
+        var available = new Size(Math.Max(1, Math.Floor((width - 2 * margin) / scale) - PanelHorizontalSpace),
+            Math.Max(1, Math.Floor((height - 2 * margin) / scale) - PanelVerticalSpace));
+        var viewport = LauncherGridLayout.MeasureViewport(available, OverviewGroups(),
+            _config.LauncherIconSize, _config.LauncherLayerGap);
+        return ((int)Math.Ceiling((viewport.Width + PanelHorizontalSpace) * scale),
+            (int)Math.Ceiling((viewport.Height + PanelVerticalSpace) * scale));
+    }
+
+    private void ResizeOverview()
+    {
+        if (!IsVisible || Search.Text.Trim().Length != 0) return;
+        if (_dockedSettings is { IsVisible: true } settings)
+            PositionDockedSettings(settings);
+        else
+        {
+            var handle = new WindowInteropHelper(this).Handle;
+            PositionNearTaskbar(WinForms.Screen.FromHandle(handle), MonitorScale(handle));
+        }
     }
 
     private static void PlaceWindow(Window window, int x, int y, int width, int height, double scale)
@@ -201,14 +259,14 @@ internal partial class LauncherWindow : Window
 
     private void QueueSectionRefresh()
     {
-        if (!_sectionVisualsDirty || _draggingEntries || _sectionRefreshQueued) return;
+        if (!_sectionVisualsDirty || _draggingEntries || _sectionRefreshQueued || _openEntryMenu is not null || _nameEditor is not null) return;
         _sectionRefreshQueued = true;
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() =>
         {
             _sectionRefreshQueued = false;
-            if (!_sectionVisualsDirty || _draggingEntries) return;
+            if (!_sectionVisualsDirty || _draggingEntries || _openEntryMenu is not null || _nameEditor is not null) return;
             _sectionVisualsDirty = false;
-            RenderDock();
+            ResizeOverview();
             Render();
         }));
     }
@@ -216,161 +274,277 @@ internal partial class LauncherWindow : Window
     internal void RefreshAppearance()
     {
         ApplyBackgroundColor();
-        RenderDock();
+        ResizeOverview();
         Render();
     }
 
     private void Render()
     {
+        _finishRename?.Invoke(true);
+        var viewport = new Size(Math.Max(0, ItemsScroll.ActualWidth - ScrollbarGutter), ItemsScroll.ActualHeight);
+        if (viewport.Width < 100 || viewport.Height < 1) return;
+
         var query = Search.Text.Trim();
         SearchHint.Visibility = Search.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (_selected is not null && !_sections.Any(section => Id(section) == _selected)) _selected = null;
+        Cards.Width = viewport.Width;
         Cards.Children.Clear();
+        _groupsPage = null;
         _firstResult = null;
-        var showOverview = !_searching && _selected is null;
-        OverviewPanel.Visibility = showOverview ? Visibility.Visible : Visibility.Collapsed;
-        Detail.Visibility = showOverview ? Visibility.Collapsed : Visibility.Visible;
-        Back.Visibility = showOverview ? Visibility.Collapsed : Visibility.Visible;
-        SearchBar.Visibility = _searching ? Visibility.Visible : Visibility.Collapsed;
-        if (showOverview)
+        if (query.Length == 0)
         {
-            RenderOverview();
+            RenderGroups(viewport);
             return;
         }
 
-        if (_searching)
+        var candidates = _sections.SelectMany(section => section.Items)
+            .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
+            .Where(item => item.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase));
+        var matches = LauncherCatalog.OrderByUsage(candidates, _config)
+            .OrderByDescending(item => item.Name.StartsWith(query, StringComparison.CurrentCultureIgnoreCase)).ToArray();
+        _firstResult = matches.FirstOrDefault();
+        var search = new LaunchSection(null, "搜索结果", matches);
+        var layout = new LauncherGridLayout(_config.LauncherIconSize, 1, _config.LauncherLayerGap);
+        Cards.Children.Add(BuildCard(search, layout, viewport.Width, emptyMessage: "没有匹配的项目"));
+    }
+
+    private void RenderGroups(Size viewport)
+    {
+        if (_sections.Count == 0)
         {
-            if (query.Length == 0) return;
-            var candidates = _sections.SelectMany(section => section.Items)
-                .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
-                .Where(item => item.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase));
-            var matches = LauncherCatalog.OrderByUsage(candidates, _config)
-                .OrderByDescending(item => item.Name.StartsWith(query, StringComparison.CurrentCultureIgnoreCase)).ToArray();
-            var search = new LaunchSection(null, "搜索结果", matches);
-            Cards.Children.Add(BuildCard(search, false));
+            Cards.Children.Add(Subtitle("正在读取快捷方式…"));
+            return;
         }
-        else
+
+        var installed = _sections.FirstOrDefault(IsAllApps);
+        var groups = OverviewGroups();
+        var layout = LauncherGridLayout.Fit(viewport, groups, _config.LauncherIconSize, _config.LauncherLayerGap);
+        var groupsPage = new StackPanel { MinHeight = viewport.Height };
+        Cards.Children.Add(groupsPage);
+        var grid = new Grid();
+        var columns = new StackPanel[layout.GroupColumns];
+        for (var index = 0; index < columns.Length; index++)
         {
-            foreach (var section in _sections.Where(section => Id(section) == _selected))
-                Cards.Children.Add(BuildCard(section, true));
+            if (index > 0) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(layout.Gap) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition());
+            columns[index] = new StackPanel();
+            Grid.SetColumn(columns[index], index * 2);
+            grid.Children.Add(columns[index]);
         }
-        if (Cards.Children.Count == 0) Cards.Children.Add(Subtitle("正在读取快捷方式…"));
-    }
-
-    private void ShowSection(string? id)
-    {
-        _searching = false;
-        _selected = id;
-        if (Search.Text.Length != 0) Search.Clear();
-        else Render();
-        ItemsScroll.ScrollToTop();
-    }
-
-    private void OpenSearch()
-    {
-        _searching = true;
-        Render();
-        Search.Focus();
-        ItemsScroll.ScrollToTop();
-    }
-
-    private FrameworkElement BuildCard(LaunchSection section, bool canDrop)
-    {
-        var card = new Grid { Margin = new Thickness(0, 0, 0, 12) };
-        card.Children.Add(new Border { Background = CardBrush, CornerRadius = new CornerRadius(17) });
-        card.Children.Add(new Border
+        groupsPage.Children.Add(grid);
+        var width = layout.CardWidth(viewport.Width, columns.Length);
+        var cardIndex = 0;
+        foreach (var section in groups)
         {
-            CornerRadius = new CornerRadius(17), BorderThickness = new Thickness(1),
-            BorderBrush = MakeBrush(100, 125, 147, 164), IsHitTestVisible = false,
-        });
+            if (LauncherGridLayout.IsEmptyUngrouped(section))
+            {
+                groupsPage.Children.Add(BuildEmptyUngrouped(section.Name, cardIndex > 0 ? layout.Gap : 0));
+                continue;
+            }
+            var column = columns[cardIndex++ % columns.Length];
+            var card = BuildCard(section, layout, width, ungrouped: section.Group is null);
+            if (column.Children.Count > 0) card.Margin = new Thickness(0, layout.Gap, 0, 0);
+            column.Children.Add(card);
+            if (_groupToReveal is not null && section.Group == _groupToReveal)
+            {
+                _groupToReveal = null;
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() => card.BringIntoView()));
+            }
+        }
 
-        var content = new StackPanel { Margin = new Thickness(12, 9, 12, 9) };
+        if (installed is null) return;
+        _groupsPage = groupsPage;
+        var appsPage = new StackPanel { MinHeight = viewport.Height };
+        var appsLayout = new LauncherGridLayout(_config.LauncherIconSize, 1, _config.LauncherLayerGap);
+        appsPage.Children.Add(BuildCard(installed, appsLayout, viewport.Width));
+        Cards.Children.Add(appsPage);
+    }
+
+    private Border BuildEmptyUngrouped(string name, int gap)
+    {
+        var text = new TextBlock { FontSize = 13, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+        text.Inlines.Add(new System.Windows.Documents.Run(name) { FontWeight = FontWeights.SemiBold });
+        text.Inlines.Add(new System.Windows.Documents.Run("   ·   将快捷方式拖到这里") { Foreground = DimBrush });
+        var strip = new Border
+        {
+            Child = text, Height = LauncherGridLayout.EmptyUngroupedHeight, Margin = new Thickness(0, gap, 0, 0),
+            Padding = new Thickness(14, 0, 14, 0), Background = CardBrush,
+            CornerRadius = new CornerRadius(10), BorderBrush = CardBorderBrush, BorderThickness = new Thickness(1),
+        };
+        WireDrop(strip, null);
+        return strip;
+    }
+
+    private LaunchSection[] OverviewGroups() => _sections.Where(section => !IsAllApps(section)).ToArray();
+
+    private static bool IsAllApps(LaunchSection section) => section.Group is null && section.Name == "所有应用";
+
+    private ScrollBar? ItemsScrollbar =>
+        ItemsScroll.Template?.FindName("PART_VerticalScrollBar", ItemsScroll) as ScrollBar;
+
+    private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (e.OriginalSource != ItemsScroll || !IsVisible) return;
+        if (ItemsScroll.ScrollableHeight <= 0)
+        {
+            HideScrollbar(fade: false);
+            return;
+        }
+        if (e.VerticalChange == 0 || ItemsScrollbar is not { } bar) return;
+        bar.BeginAnimation(OpacityProperty, null);
+        bar.Opacity = 1;
+        bar.IsHitTestVisible = true;
+        _scrollbarTimer.Stop();
+        _scrollbarTimer.Start();
+    }
+
+    private void HideScrollbar(bool fade)
+    {
+        _scrollbarTimer.Stop();
+        if (ItemsScrollbar is not { } bar) return;
+        var opacity = bar.Opacity;
+        bar.BeginAnimation(OpacityProperty, null);
+        bar.IsHitTestVisible = false;
+        bar.Opacity = 0;
+        if (fade && opacity > 0)
+            bar.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(opacity, 0, TimeSpan.FromMilliseconds(180)) { FillBehavior = FillBehavior.Stop });
+    }
+
+    private void OnOverviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (_groupsPage is null || _groupsPage.ActualHeight == 0) return;
+        var boundary = _groupsPage.ActualHeight;
+        var offset = ItemsScroll.VerticalOffset;
+        var lastGroupsOffset = Math.Max(0, boundary - ItemsScroll.ViewportHeight);
+
+        // Skip the unused space after the last row of groups when moving between pages.
+        if (e.Delta < 0 && offset >= lastGroupsOffset && offset < boundary)
+            ItemsScroll.ScrollToVerticalOffset(boundary);
+        else if (e.Delta > 0 && offset > lastGroupsOffset && offset <= boundary)
+            ItemsScroll.ScrollToVerticalOffset(lastGroupsOffset);
+        else return;
+        e.Handled = true;
+    }
+
+    private FrameworkElement BuildCard(LaunchSection section, LauncherGridLayout layout, double width,
+        bool ungrouped = false, string emptyMessage = "暂无项目")
+    {
+        var content = new StackPanel { Margin = new Thickness(LauncherGridLayout.CardPadding - 1) };
+        var card = new Border
+        {
+            Background = CardBrush, CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(1),
+            BorderBrush = CardBorderBrush, Child = content,
+        };
         var heading = new TextBlock
         {
             Text = section.Name, Foreground = TextBrush, FontSize = 15, FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(6, 2, 6, 5),
+            Height = LauncherGridLayout.HeadingHeight, Padding = new Thickness(5, 1, 5, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = section.Name,
         };
-        if (section.Group is { IsVirtual: true } group) heading.ContextMenu = GroupMenu(group);
-        content.Children.Add(heading);
-        if (section.Items.Count == 0)
-            content.Children.Add(Subtitle(section.Group is not null ? "将快捷方式拖到这里" :
-                canDrop ? "暂无项目" : "没有匹配的项目"));
-        else
+        var group = section.Group is { IsVirtual: true } ? section.Group : null;
+        if (group is not null) card.ContextMenu = GroupMenu(group);
+        if (group is not null || ungrouped) WireDrop(card, group);
+        var body = new ContentControl();
+        if (IsAllApps(section))
         {
-            var tiles = new WrapPanel();
-            foreach (var entry in section.Items)
+            var filter = new CheckBox
             {
-                _firstResult ??= entry;
-                var tile = BuildTile(entry);
-                if (canDrop && section.Group is { IsVirtual: true }) WireDrop(tile, section.Group);
+                Content = "隐藏已分组应用", IsChecked = _config.LauncherHideGroupedApps,
+                Foreground = TextBrush, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 5, 0),
+            };
+            var header = new DockPanel { Height = LauncherGridLayout.HeadingHeight };
+            DockPanel.SetDock(filter, Dock.Right);
+            header.Children.Add(filter);
+            header.Children.Add(heading);
+            content.Children.Add(header);
+            filter.Click += (_, _) =>
+            {
+                _config.LauncherHideGroupedApps = filter.IsChecked == true;
+                RenderItems();
+                SaveChange();
+            };
+        }
+        else content.Children.Add(heading);
+        content.Children.Add(body);
+        RenderItems();
+        return card;
+
+        void RenderItems()
+        {
+            var filtered = IsAllApps(section) && _config.LauncherHideGroupedApps;
+            var items = filtered ? LauncherCatalog.ExcludeGroupedApps(section.Items, _sections) : section.Items;
+            if (items.Count == 0)
+            {
+                body.Content = Subtitle(group is not null ? "将快捷方式拖到这里" : filtered ? "没有未分组的应用" : emptyMessage);
+                return;
+            }
+
+            if (IsAllApps(section))
+            {
+                var categories = new StackPanel();
+                foreach (var (name, entries) in LauncherAppCategories.Group(items, ProgramsFolders.Value))
+                {
+                    categories.Children.Add(new TextBlock
+                    {
+                        Text = name, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = DimBrush,
+                        Margin = new Thickness(5, 12, 5, 4),
+                    });
+                    categories.Children.Add(BuildTiles(entries));
+                }
+                body.Content = categories;
+            }
+            else body.Content = BuildTiles(items);
+        }
+
+        UniformGrid BuildTiles(IReadOnlyList<LaunchEntry> items)
+        {
+            var columns = Math.Min(items.Count, layout.TileColumns(width));
+            var tiles = new UniformGrid
+            {
+                Columns = columns, Width = columns * layout.TileWidth,
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            foreach (var entry in items)
+            {
+                var tile = BuildTile(entry, layout);
+                if (group is not null || ungrouped) WireDrop(tile, group);
                 tiles.Children.Add(tile);
             }
-            content.Children.Add(tiles);
+            return tiles;
         }
-        card.Children.Add(content);
-        if (canDrop && (section.Group is { IsVirtual: true } || Id(section) == "desktop")) WireDrop(card, section.Group);
-        return card;
     }
 
-    private void AddBackground(Grid parent, UIElement? anchor = null, Rect region = default)
+    private Button BuildTile(LaunchEntry item, LauncherGridLayout layout)
     {
-        var layer = new LauncherBackgroundLayer(Scene, anchor, region);
-        layer.Loaded += (_, _) =>
-        {
-            _backgroundLayers.Add(layer);
-            layer.Align();
-        };
-        layer.Unloaded += (_, _) => _backgroundLayers.Remove(layer);
-        parent.Children.Add(layer);
-    }
-
-    private TextBlock CreateTileLabel(string name, bool compact)
-    {
-        var label = new TextBlock
-        {
-            Text = name, FontFamily = FontFamily, FontSize = compact ? 11 : 11.5, TextAlignment = TextAlignment.Center,
-            TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxHeight = compact ? LauncherWheelLayout.CompactLabelMaxHeight : 32,
-            Margin = new Thickness(0, compact ? LauncherWheelLayout.CompactLabelGap : 4, 0, 0),
-        };
-        if (compact)
-        {
-            label.MaxWidth = LauncherWheelLayout.CompactTileSize(_config.LauncherIconSize).Width - 2 * LauncherWheelLayout.CompactHorizontalInset;
-            label.LineHeight = LauncherWheelLayout.CompactLabelHeight;
-            label.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
-        }
-        return label;
-    }
-
-    private static Size MeasureCompactLabel(TextBlock label)
-    {
-        label.Measure(new Size(label.MaxWidth, double.PositiveInfinity));
-        return new Size(label.DesiredSize.Width, Math.Max(0, label.DesiredSize.Height - label.Margin.Top));
-    }
-
-    private Button BuildTile(LaunchEntry item, bool compact = false, TextBlock? preparedLabel = null)
-    {
-        var size = _config.LauncherIconSize;
-        var bounds = LauncherWheelLayout.CompactTileSize(size);
+        var size = layout.IconSize;
         var scale = new ScaleTransform(1, 1);
         var image = new Image
         {
             Width = size, Height = size,
+            Margin = new Thickness(0, LauncherGridLayout.HoverInset, 0, LauncherGridLayout.HoverInset),
             Source = IconCache.TryGetFast(item.Path, size) ?? IconCache.Placeholder(size),
-            RenderTransform = scale, RenderTransformOrigin = new Point(0.5, 1),
+            RenderTransform = scale, RenderTransformOrigin = new Point(0.5, 0.5),
         };
         var stack = new StackPanel();
         stack.Children.Add(image);
-        stack.Children.Add(preparedLabel ?? CreateTileLabel(item.Name, compact));
-        var tile = new Button { Content = stack, Style = (Style)FindResource("LauncherTile") };
-        tile.MouseEnter += (_, _) => AnimateIcon(1 + LauncherWheelLayout.IconHoverGrowth(size) / size);
+        var label = new TextBlock
+        {
+            Text = item.Name, FontSize = 12, TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.CharacterEllipsis,
+            LineHeight = 14, LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
+            MaxHeight = 28, MaxWidth = layout.TileWidth - 6, Margin = new Thickness(0, 5, 0, 0),
+        };
+        stack.Children.Add(label);
+        var tile = new Button { Content = stack, Style = (Style)FindResource("LauncherTile"), Tag = item };
+        tile.MouseEnter += (_, _) => AnimateIcon(1 + Math.Min(size * 0.1, 2 * LauncherGridLayout.HoverInset) / size);
         tile.MouseLeave += (_, _) => AnimateIcon(1);
-        tile.Width = compact ? bounds.Width : Math.Max(90, size + 20);
-        tile.Height = compact ? bounds.Height : size + 48;
-        tile.Padding = compact ? new Thickness(2, 1, 2, 1) : new Thickness(3, 5, 3, 3);
-        tile.VerticalContentAlignment = VerticalAlignment.Top;
+        tile.Width = layout.TileWidth;
+        tile.Height = layout.TileHeight;
+        tile.Padding = new Thickness(2, 2, 2, 1);
         var description = item.Name + "\n" + item.Path;
         tile.ToolTip = description;
+        ToolTipService.SetShowDuration(tile, 1000);
         System.Windows.Automation.AutomationProperties.SetName(tile, item.Name);
         tile.Click += (_, _) => Launch(item);
         tile.Loaded += async (_, _) =>
@@ -384,7 +558,7 @@ internal partial class LauncherWindow : Window
         tile.PreviewMouseLeftButtonUp += (_, _) => origin = null;
         tile.PreviewMouseMove += (_, e) =>
         {
-            if (origin is not { } start || e.LeftButton != MouseButtonState.Pressed) return;
+            if (_nameEditor is not null || origin is not { } start || e.LeftButton != MouseButtonState.Pressed) return;
             var delta = e.GetPosition(tile) - start;
             if (Math.Abs(delta.X) < SystemParameters.MinimumHorizontalDragDistance &&
                 Math.Abs(delta.Y) < SystemParameters.MinimumVerticalDragDistance) return;
@@ -402,8 +576,23 @@ internal partial class LauncherWindow : Window
                 QueueSectionRefresh();
             }
         };
-        tile.ContextMenuOpening += (_, _) => tile.ContextMenu = EntryMenu(item);
-        tile.ContextMenu = new ContextMenu();
+        var contextMenu = new ContextMenu();
+        tile.ContextMenu = contextMenu;
+        tile.ContextMenuOpening += (_, e) =>
+        {
+            if (_nameEditor is not null)
+            {
+                e.Handled = true;
+                return;
+            }
+            PopulateEntryMenu(contextMenu, item);
+        };
+        contextMenu.Opened += (_, _) => _openEntryMenu = contextMenu;
+        contextMenu.Closed += (_, _) =>
+        {
+            if (_openEntryMenu == contextMenu) _openEntryMenu = null;
+            QueueSectionRefresh();
+        };
         return tile;
 
         void AnimateIcon(double targetScale)
@@ -417,16 +606,16 @@ internal partial class LauncherWindow : Window
         }
     }
 
-    private ContextMenu EntryMenu(LaunchEntry item)
+    private void PopulateEntryMenu(ContextMenu menu, LaunchEntry item)
     {
-        var menu = new ContextMenu();
+        menu.Items.Clear();
         AddMenu(menu, "打开", () => Launch(item));
         if (!VirtualGroups.IsShell(item.Path))
         {
             if (!item.IsShortcut || ShortcutIcon.IsLink(item.Path))
-                AddMenu(menu, "打开文件所在位置", () => RevealEntry(item, resolveTarget: item.IsShortcut));
+                AddMenu(menu, "打开文件所在位置", () => QueueRevealEntry(item, resolveTarget: item.IsShortcut));
             if (item.IsShortcut)
-                AddMenu(menu, "打开快捷方式所在位置", () => RevealEntry(item, resolveTarget: false));
+                AddMenu(menu, "打开快捷方式所在位置", () => QueueRevealEntry(item, resolveTarget: false));
         }
         var source = _config.Boxes.FirstOrDefault(box => box.IsVirtual &&
             box.Entries.Any(entry => string.Equals(entry.Path, item.Path, StringComparison.OrdinalIgnoreCase)));
@@ -438,10 +627,15 @@ internal partial class LauncherWindow : Window
         if (item.IsShortcut)
         {
             menu.Items.Add(new Separator());
+            if (AppUninstaller.Find(item) is { } uninstaller)
+                AddMenu(menu, "卸载", () => UninstallEntry(item, uninstaller));
             AddMenu(menu, "删除快捷方式", () => DeleteShortcut(item));
         }
-        return menu;
     }
+
+    private void QueueRevealEntry(LaunchEntry item, bool resolveTarget) =>
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,
+            new Action(() => RevealEntry(item, resolveTarget)));
 
     private void RevealEntry(LaunchEntry item, bool resolveTarget) => Interact(() =>
     {
@@ -452,8 +646,68 @@ internal partial class LauncherWindow : Window
                 item.IsShortcut ? "找不到快捷方式文件。" : "找不到这个文件或文件夹。");
             return;
         }
-        if (ShellItemInterop.RevealItem(path)) Hide();
+        if (FsUtil.TryRevealInExplorer(path)) Hide();
         else ShowEntryWarning("无法在资源管理器中打开这个位置。");
+    });
+
+    private void BeginRename(Button tile, LaunchEntry item)
+    {
+        if (_nameEditor is not null || tile.Content is not StackPanel stack || stack.Children[1] is not TextBlock label) return;
+        var editor = new TextBox
+        {
+            Text = item.Name, Width = tile.Width - 6, Height = 28, Margin = label.Margin,
+            Padding = new Thickness(2, 0, 2, 0), FontSize = label.FontSize, TextAlignment = TextAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Top, Foreground = TextBrush, CaretBrush = TextBrush,
+            Background = MakeBrush(255, 35, 43, 53), BorderBrush = MakeBrush(255, 129, 165, 200),
+        };
+        System.Windows.Automation.AutomationProperties.SetName(editor, "修改显示名称");
+        _nameEditor = editor;
+        _finishRename = Finish;
+        ToolTipService.SetIsEnabled(tile, false);
+        stack.Children.RemoveAt(1);
+        stack.Children.Add(editor);
+        editor.LostKeyboardFocus += (_, _) => Finish(true);
+        editor.Focus();
+        editor.SelectAll();
+
+        void Finish(bool save)
+        {
+            if (_nameEditor != editor) return;
+            _nameEditor = null;
+            _finishRename = null;
+            var name = editor.Text.Trim();
+            var changed = save && name.Length != 0 && !string.Equals(name, item.Name, StringComparison.Ordinal);
+            if (changed)
+            {
+                label.Text = name;
+                _config.LauncherDisplayNames[item.Path] = name;
+            }
+            stack.Children.Remove(editor);
+            stack.Children.Add(label);
+            ToolTipService.SetIsEnabled(tile, true);
+            if (changed) SaveChange();
+            QueueSectionRefresh();
+        }
+    }
+
+    private void UninstallEntry(LaunchEntry item, AppUninstaller uninstaller) => Interact(() =>
+    {
+        if (AppUninstaller.Find(item) != uninstaller)
+        {
+            ShowEntryWarning("找不到对应的卸载程序。");
+            return;
+        }
+        try
+        {
+            uninstaller.Start();
+            Hide();
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223) { } // 用户取消了系统提示。
+        catch (Win32Exception ex)
+        {
+            Log.Warn($"启动卸载程序失败 {item.Path}：{ex.Message}");
+            ShowEntryWarning($"无法启动「{item.Name}」的卸载程序。");
+        }
     });
 
     private void DeleteShortcut(LaunchEntry item) => Interact(() =>
@@ -495,7 +749,11 @@ internal partial class LauncherWindow : Window
                 path, StringComparison.OrdinalIgnoreCase)).Select(entry => entry.Path);
             VirtualGroups.Remove(box, staleCopies.Append(path));
         }
+        _config.LauncherUngroupedEntries.RemoveAll(entry =>
+            string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(LaunchEntry.MissingLinkRewriteSource(entry.Path), path, StringComparison.OrdinalIgnoreCase));
         _config.LauncherOpenCounts.Remove(path);
+        _config.LauncherDisplayNames.Remove(path);
         ShortcutDeleted?.Invoke(path);
         SaveChange();
     });
@@ -520,6 +778,8 @@ internal partial class LauncherWindow : Window
         {
             if (MessageBox.Show(this, $"解散「{group.Title}」？组内项目会保留在原处。", "简桌",
                     MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+            var entries = group.Entries.Where(entry => !string.IsNullOrWhiteSpace(entry.Path)).ToArray();
+            VirtualGroups.MoveToUngrouped(_config, entries);
             _config.Boxes.Remove(group);
             SaveChange();
         }));
@@ -531,7 +791,7 @@ internal partial class LauncherWindow : Window
         target.AllowDrop = true;
         target.DragOver += (_, e) =>
         {
-            if (!e.Data.GetDataPresent(EntryFormat, false) && (group is null || !ShellDrop.CanAccept(e.Data))) return;
+            if (!e.Data.GetDataPresent(EntryFormat, false) && !ShellDrop.CanAccept(e.Data)) return;
             e.Effects = DragDropEffects.Copy;
             e.Handled = true;
         };
@@ -539,7 +799,7 @@ internal partial class LauncherWindow : Window
         {
             if (e.Data.GetData(EntryFormat, false) is LaunchEntry entry)
                 MoveEntries(group, new[] { entry });
-            else if (group is not null && ShellDrop.CanAccept(e.Data))
+            else if (ShellDrop.CanAccept(e.Data))
                 MoveEntries(group, ShellDrop.Read(e.Data)
                     .Select(item => LaunchEntry.FromPath(item.FileSystemPath ?? item.ParsingName, item.DisplayName)).ToArray());
             else return;
@@ -551,21 +811,18 @@ internal partial class LauncherWindow : Window
     private void MoveEntries(BoxConfig? target, IReadOnlyList<LaunchEntry> items)
     {
         if (items.Count == 0) return;
-        var paths = items.Select(item => item.Path).ToArray();
-        if (target is null)
+        var entries = items.Select(item => new GroupEntry
         {
-            foreach (var box in _config.Boxes.Where(box => box.IsVirtual))
-                VirtualGroups.Remove(box, paths);
-        }
-        else
-        {
-            VirtualGroups.Add(_config, target, items.Select(item => new GroupEntry
-            {
-                Path = item.Path,
-                DisplayName = VirtualGroups.IsShell(item.Path) ? item.Name : "",
-            }));
-        }
+            Path = item.Path,
+            DisplayName = VirtualGroups.IsShell(item.Path) ? OriginalShellName(item) : "",
+        });
+        if (target is null) VirtualGroups.MoveToUngrouped(_config, entries);
+        else VirtualGroups.Add(_config, target, entries);
         SaveChange();
+
+        string OriginalShellName(LaunchEntry item) =>
+            VirtualGroups.References(_config).FirstOrDefault(entry =>
+                string.Equals(entry.Path, item.Path, StringComparison.OrdinalIgnoreCase))?.DisplayName ?? item.Name;
     }
 
     internal void CreateGroup() => Interact(() =>
@@ -574,30 +831,41 @@ internal partial class LauncherWindow : Window
         if (string.IsNullOrEmpty(name)) return;
         var box = new BoxConfig { Title = name, IsVirtual = true };
         _config.Boxes.Add(box);
-        _selected = box.Id;
+        _groupToReveal = box;
         Search.Clear();
         SaveChange();
     });
 
-    private void AlignBackgroundLayers()
-    {
-        if (!IsVisible) return;
-        foreach (var surface in _backgroundLayers) surface.Align();
-    }
-
     private void OnKeyDown(object sender, KeyEventArgs e)
     {
+        if (_nameEditor is not null)
+        {
+            if (e.Key is Key.Enter or Key.Escape)
+            {
+                e.Handled = true;
+                _finishRename?.Invoke(e.Key == Key.Enter);
+                Keyboard.Focus(PanelRoot);
+            }
+            return;
+        }
         if (e.Key == Key.Escape)
         {
-            if (_searching || _selected is not null) ShowSection(null);
+            if (Search.Text.Length != 0) Search.Clear();
             else if (_preview) Close();
             else Hide();
             e.Handled = true;
         }
         else if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
         {
-            OpenSearch();
+            Search.Focus();
+            Search.SelectAll();
             e.Handled = true;
+        }
+        else if (e.Key == Key.F2 && Keyboard.Modifiers == ModifierKeys.None &&
+                 (FindTile(Mouse.DirectlyOver) ?? FindTile(Keyboard.FocusedElement)) is { Tag: LaunchEntry entry } tile)
+        {
+            e.Handled = true;
+            if (!e.IsRepeat) BeginRename(tile, entry);
         }
         else if (e.Key == Key.Enter && Search.IsKeyboardFocusWithin && Search.Text.Trim().Length != 0 &&
                  _firstResult is { } item)
@@ -605,6 +873,15 @@ internal partial class LauncherWindow : Window
             Launch(item);
             e.Handled = true;
         }
+    }
+
+    private Button? FindTile(IInputElement? element)
+    {
+        for (var visual = element as Visual; visual is not null && visual != PanelRoot;
+             visual = VisualTreeHelper.GetParent(visual) as Visual)
+            if (visual is Button { Tag: LaunchEntry } tile && IsAncestorOf(tile))
+                return tile;
+        return null;
     }
 
     private void Launch(LaunchEntry item)
@@ -624,11 +901,10 @@ internal partial class LauncherWindow : Window
         finally { _interacting = false; }
     }
 
-    private Button PanelButton(object content) => new() { Content = content, Style = (Style)FindResource("PanelButton") };
-    private static string Id(LaunchSection section) => section.Group?.Id ?? (section.Name == "未分组" ? "desktop" : "installed");
     private static TextBlock Subtitle(string value) => new()
     {
-        Text = value, Foreground = DimBrush, Margin = new Thickness(6, 4, 6, 7), FontSize = 12,
+        Text = value, Foreground = DimBrush, Padding = new Thickness(5, 0, 5, 0), Height = 24, FontSize = 12,
+        TextTrimming = TextTrimming.CharacterEllipsis,
     };
 
     private static void AddMenu(ItemsControl menu, string label, Action action)

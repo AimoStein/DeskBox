@@ -1,7 +1,9 @@
 using DeskBox.Models;
 using DeskBox.Views;
 using System.Windows;
-using System.Windows.Media;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Threading;
 
 namespace DeskBox.Services;
 
@@ -35,6 +37,76 @@ internal static class LauncherSelfTest
         check("开始面板-仅按原路径归组，保留同名桌面入口和已安装应用",
             sections[0].Items.SequenceEqual(new[] { personal }) && sections[1].Items.SequenceEqual(new[] { shared }) &&
             sections[2].Items.SequenceEqual(new[] { app }), "");
+        var allAppsCatalog = new LauncherCatalog(new[] { personal, shared }, new[] { app, personal, shared });
+        var allAppSections = allAppsCatalog.Sections(config);
+        check("开始面板-所有应用包含已分组和未分组的安装入口",
+            allAppSections[2].Items.ToHashSet().SetEquals(new[] { app, personal, shared }), "");
+        config.LauncherDisplayNames[personal.Path.ToUpperInvariant()] = "我的编辑器";
+        config.LauncherDisplayNames[app.Path] = "我的应用";
+        var renamedSections = allAppsCatalog.Sections(config);
+        check("开始面板-自定义名称在分组及所有应用生效，同名入口保持原名",
+            renamedSections[0].Items.Single() == personal with { Name = "我的编辑器" } &&
+            renamedSections[1].Items.Single() == shared &&
+            renamedSections[2].Items.Contains(app with { Name = "我的应用" }) &&
+            renamedSections[2].Items.Contains(personal with { Name = "我的编辑器" }), "");
+        config.LauncherDisplayNames.Clear();
+        var office = new LaunchEntry(@"shell:AppsFolder\Example.Office", "Excel") with { Name = "自定义名称" };
+        var browser = new LaunchEntry(@"shell:AppsFolder\Example.Browser", "Chrome");
+        var game = LaunchEntry.FromPath(Path.Combine(sandbox, "Steam", "SteamVR.lnk"));
+        var categories = LauncherAppCategories.Group(new[] { office, browser, game, app }, new[] { sandbox });
+        check("开始面板-所有应用按原始名称和开始菜单目录分类，自定义名称不影响分类",
+            categories.Select(category => category.Name).SequenceEqual(new[] { "办公与效率", "网络与沟通", "游戏与娱乐", "其他应用" }) &&
+            categories.SelectMany(category => category.Items).ToHashSet().SetEquals(new[] { office, browser, game, app }), "");
+        var otherApps = Enumerable.Range(1, 25)
+            .Select(number => new LaunchEntry($@"shell:AppsFolder\Example.Sample{number:D2}", $"Example {number:D2}"))
+            .ToArray();
+        var categoryConfig = new AppConfig();
+        categoryConfig.RecordLauncherOpen(otherApps[^1].Path);
+        categoryConfig.RecordLauncherOpen(otherApps[1].Path);
+        categoryConfig.RecordLauncherOpen(otherApps[^1].Path);
+        var installedSection = new LauncherCatalog(Array.Empty<LaunchEntry>(), otherApps).Sections(categoryConfig)[^1];
+        var otherCategory = LauncherAppCategories.Group(installedSection.Items, Array.Empty<string>()).Single();
+        check("开始面板-其他应用按字母分组后仍按打开次数排列图标",
+            otherCategory.Name == "其他应用 · A–F" && otherCategory.Items.SequenceEqual(
+                new[] { otherApps[^1], otherApps[1], otherApps[0] }.Concat(otherApps.Skip(2).SkipLast(1))), "");
+        var shortcutFolder = Path.Combine(sandbox, "launcher-filter");
+        Directory.CreateDirectory(shortcutFolder);
+        var groupedUrl = Path.Combine(shortcutFolder, "原入口.url");
+        var installedUrl = Path.Combine(shortcutFolder, "安装入口.url");
+        File.WriteAllText(groupedUrl, "[InternetShortcut]\nURL=https://example.test/app\n");
+        File.Copy(groupedUrl, installedUrl, overwrite: true);
+        var filterGroup = new LaunchSection(group, group.Title, new[] { personal, LaunchEntry.FromPath(groupedUrl) });
+        var filtered = LauncherCatalog.ExcludeGroupedApps(new[] { personal, shared, app, LaunchEntry.FromPath(installedUrl) }, new[] { filterGroup });
+        check("开始面板-过滤同路径及同目标的快捷方式，保留同名不同入口",
+            filtered.SequenceEqual(new[] { shared, app }), "");
+        var launchTarget = Path.Combine(shortcutFolder, "App.exe");
+        var firstLink = WriteLink("Desktop.lnk", "--launch-from=desktopicon --brand=example", sandbox);
+        var secondLink = WriteLink("Installed.lnk", "--launch-from=startmenu --brand=example", shortcutFolder);
+        var featureLink = WriteLink("Feature.lnk", "--launch-from=startmenu --brand=example --feature", shortcutFolder);
+        var controlPanel = new LaunchEntry(@"shell:AppsFolder\Microsoft.Windows.ControlPanel", "控制面板");
+        var duplicateGroup = new LaunchSection(group, group.Title,
+            new[] { firstLink, new LaunchEntry("::{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}", "控制面板") });
+        check("开始面板-过滤工作目录、启动来源和 Shell 入口不同的重复应用",
+            LauncherCatalog.ExcludeGroupedApps(new[] { secondLink, featureLink, controlPanel }, new[] { duplicateGroup })
+                .SequenceEqual(new[] { featureLink }), "");
+
+        LaunchEntry WriteLink(string name, string args, string directory)
+        {
+            var path = ShortcutFactory.CreateInFolder(shortcutFolder, launchTarget, name);
+            using var com = DeskBox.Interop.ShellItemInterop.EnsureComInitialized();
+            var link = DeskBox.Interop.ShellItemInterop.CreateShellLink();
+            try
+            {
+                var file = (DeskBox.Interop.ShellItemInterop.IPersistFile)link;
+                System.Runtime.InteropServices.Marshal.ThrowExceptionForHR(file.Load(path, 0));
+                System.Runtime.InteropServices.Marshal.ThrowExceptionForHR(link.SetArguments(args));
+                System.Runtime.InteropServices.Marshal.ThrowExceptionForHR(link.SetWorkingDirectory(directory));
+                System.Runtime.InteropServices.Marshal.ThrowExceptionForHR(file.Save(path, true));
+            }
+            finally { System.Runtime.InteropServices.Marshal.ReleaseComObject(link); }
+            return LaunchEntry.FromPath(path);
+        }
+
         VirtualGroups.Remove(group, new[] { personal.Path });
         check("开始面板-移出后恢复到未分组", catalog.Sections(config)[1].Items.Count == 2, "");
 
@@ -52,155 +124,162 @@ internal static class LauncherSelfTest
         var expected = new[] { zulu, alpha, beta, idle };
         check("开始面板-同组优先打开次数，次数相同按名称排序",
             usageCatalog.Sections(config)[0].Items.SequenceEqual(expected), "");
-        VirtualGroups.Remove(group, usageItems.Select(item => item.Path));
-        check("开始面板-移出分组保留打开次数，底栏按同一规则排序",
+        VirtualGroups.MoveToUngrouped(config, usageItems.Select(item => new GroupEntry { Path = item.Path }));
+        check("开始面板-移出分组保留打开次数，未分组按同一规则排序",
             usageCatalog.Sections(config)[1].Items.SequenceEqual(expected), "");
         var renamed = Path.Combine(sandbox, "Renamed.lnk");
+        config.LauncherDisplayNames[zulu.Path] = "我的 Zulu";
         check("开始面板-快捷方式改名保留打开次数",
             VirtualGroups.RenameReference(config, zulu.Path, renamed) &&
             config.LauncherOpenCounts.GetValueOrDefault(renamed) == 2 &&
             !config.LauncherOpenCounts.ContainsKey(zulu.Path), "");
+        check("开始面板-原文件更名后保留自定义名称",
+            config.LauncherDisplayNames.GetValueOrDefault(renamed) == "我的 Zulu" &&
+            !config.LauncherDisplayNames.ContainsKey(zulu.Path), "");
 
-        var counts = new[] { 18, 8, 12, 31, 7 };
-        var layout = LauncherWheelLayout.Arrange(new Size(1480, 1480), counts, 32, 4);
-        var footprint = (GeometryGroup)LauncherWheelLayout.CompactTileClip(32, new Size(48, LauncherWheelLayout.CompactLabelHeight));
-        Geometry PlaceFootprint(Point point)
+        var outside = LaunchEntry.FromPath(Path.Combine(sandbox, "outside", "外部快捷方式.lnk"));
+        var moveItems = new[] { app, outside };
+        var references = moveItems.Select(item => new GroupEntry { Path = item.Path, DisplayName = item == app ? item.Name : "" }).ToArray();
+        VirtualGroups.Add(config, group, references);
+        VirtualGroups.MoveToUngrouped(config, references);
+        VirtualGroups.MoveToUngrouped(config, references);
+        var restoredConfig = System.Text.Json.JsonSerializer.Deserialize<AppConfig>(System.Text.Json.JsonSerializer.Serialize(config))!;
+        var ungrouped = catalog.Sections(restoredConfig)[1].Items;
+        check("开始面板-Shell 应用和外部快捷方式移出后持久显示在未分组，重复拖放不重复",
+            group.Entries.Count == 0 && moveItems.All(item => ungrouped.Count(entry => entry == item) == 1), "");
+
+        VirtualGroups.Add(config, group, references);
+        check("开始面板-重新归组后从未分组移除",
+            moveItems.All(item => !catalog.Sections(config)[1].Items.Contains(item)) &&
+            moveItems.All(item => catalog.Sections(config)[0].Items.Contains(item)) &&
+            !config.LauncherUngroupedEntries.Any(entry => moveItems.Any(item => item.Path == entry.Path)), "");
+
+        var counts = new[] { 14, 8, 10, 14, 6, 12, 31 };
+        var groups = counts.Select(count => new LaunchSection(group, group.Title, Enumerable.Repeat(alpha, count).ToArray())).ToArray();
+        var viewport = new Size(1760, 1260);
+        var layout = LauncherGridLayout.Fit(viewport, groups, 49, 18);
+        check("开始面板-首屏优先完整展示分组和未分组快捷方式",
+            layout.GroupColumns > 1 && layout.IconSize == 49 && layout.TotalHeight(viewport.Width, groups) <= viewport.Height, "");
+        var fitted = LauncherGridLayout.MeasureViewport(viewport, groups, 49, 18);
+        var fittedLayout = LauncherGridLayout.Fit(fitted, groups, 49, 18);
+        check("开始面板-按分组实际面积确定窗口尺寸",
+            fitted.Width < viewport.Width && fitted.Height < viewport.Height && fittedLayout.IconSize == 49 &&
+            fittedLayout.TotalHeight(fitted.Width, groups) == fitted.Height, $"{fitted.Width} × {fitted.Height}");
+        var fittedColumns = fittedLayout.TileColumns(fittedLayout.CardWidth(fitted.Width, fittedLayout.GroupColumns));
+        check("开始面板-有足够空间时每组横向图标多于竖向",
+            counts.All(count => Math.Min(count, fittedColumns) > Math.Ceiling(count / (double)fittedColumns)), "");
+
+        var narrowViewport = new Size(420, 320);
+        var narrow = LauncherGridLayout.Fit(narrowViewport, groups, 49, 18);
+        check("开始面板-窄窗口自动压缩并保留全部可滚动内容",
+            narrow.IconSize == 32 && narrow.TotalHeight(narrowViewport.Width, groups) > narrowViewport.Height &&
+            narrow.TileColumns(narrow.CardWidth(narrowViewport.Width, narrow.GroupColumns)) > 0, "");
+        check("开始面板-尺寸受限时使用可用空间并允许滚动",
+            LauncherGridLayout.MeasureViewport(narrowViewport, groups, 49, 18) == narrowViewport, "");
+
+        var screen = new System.Drawing.Rectangle(-1920, 0, 1920, 1080);
+        check("开始面板-按任务栏所在边定位并保留 DPI 缩放间距",
+            LauncherWindow.NearTaskbar(screen, new(-1920, 0, 1920, 1032), 800, 600, 1.25) == new System.Drawing.Point(-1360, 422) &&
+            LauncherWindow.NearTaskbar(screen, new(-1920, 48, 1920, 1032), 800, 600, 1) == new System.Drawing.Point(-1360, 56) &&
+            LauncherWindow.NearTaskbar(screen, new(-1872, 0, 1872, 1080), 800, 600, 1) == new System.Drawing.Point(-1864, 240) &&
+            LauncherWindow.NearTaskbar(screen, new(-1920, 0, 1872, 1080), 800, 600, 1) == new System.Drawing.Point(-856, 240), "");
+
+        var empty = new LaunchSection(group, group.Title, Array.Empty<LaunchEntry>());
+        var withEmpty = new[] { empty, empty };
+        var roomy = LauncherGridLayout.Fit(viewport, withEmpty, 64, 21);
+        check("开始面板-空分组保留空间，内容较少时沿用设置中的图标尺寸和间距",
+            roomy.IconSize == 64 && roomy.GroupColumns == 2 && roomy.Gap == 21 &&
+            roomy.TotalHeight(viewport.Width, withEmpty) > LauncherGridLayout.HeadingHeight, "");
+        var emptySize = LauncherGridLayout.MeasureViewport(viewport, withEmpty, 49, 18);
+        check("开始面板-内容变少时窗口自动缩小",
+            emptySize.Width * emptySize.Height < fitted.Width * fitted.Height, "");
+
+        var window = new LauncherWindow(config);
+        try
         {
-            var clip = footprint.Clone();
-            clip.Transform = new TranslateTransform(point.X - layout.TileSize.Width / 2, point.Y - layout.IconAnchor);
-            return clip;
+            window.SetSections(allAppSections);
+            var root = (FrameworkElement)window.Content;
+            var scroll = (ScrollViewer)window.FindName("ItemsScroll");
+            var cards = (StackPanel)window.FindName("Cards");
+            var compact = LauncherGridLayout.MeasureViewport(viewport, sections.Take(2).ToArray(), config.LauncherIconSize, config.LauncherLayerGap);
+            var panel = new Size(compact.Width + LauncherWindow.PanelHorizontalSpace, compact.Height + LauncherWindow.PanelVerticalSpace);
+            root.Measure(panel);
+            root.Arrange(new Rect(panel));
+            FlushLayout();
+
+            var appsPage = (FrameworkElement)cards.Children[1];
+            var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
+            double AppsTop() => appsPage.TranslatePoint(new Point(), content).Y;
+            check("开始面板-所有应用位于首屏可视范围之外",
+                scroll.ViewportHeight > 0 && AppsTop() >= scroll.ViewportHeight - 0.5, "");
+
+            Wheel(-120);
+            check("开始面板-向下滚动到所有应用",
+                scroll.VerticalOffset > 0 && Math.Abs(AppsTop()) < 0.5, "");
+
+            var appCard = (Border)((StackPanel)appsPage).Children[0];
+            var appContent = (StackPanel)appCard.Child;
+            var filter = (CheckBox)((DockPanel)appContent.Children[0]).Children[0];
+            var appBody = (ContentControl)appContent.Children[1];
+            var savedChanges = 0;
+            window.ConfigChanged += () => savedChanges++;
+            var initialCount = AppTiles().Count();
+            var firstTile = (Button)AppTiles().First();
+            check("开始面板-路径提示显示一秒，面板根节点无虚线焦点框",
+                ToolTipService.GetShowDuration(firstTile) == 1000 && root.FocusVisualStyle is null, "");
+            var icon = (Image)((StackPanel)firstTile.Content).Children[0];
+            firstTile.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            var animationEnd = new DispatcherFrame();
+            var animationTimer = new DispatcherTimer(DispatcherPriority.Background)
+                { Interval = TimeSpan.FromMilliseconds(240) };
+            animationTimer.Tick += (_, _) => animationEnd.Continue = false;
+            animationTimer.Start();
+            Dispatcher.PushFrame(animationEnd);
+            animationTimer.Stop();
+            var iconBounds = icon.TransformToAncestor(firstTile).TransformBounds(new Rect(icon.RenderSize));
+            var tileBorder = (Border)firstTile.Template.FindName("Tile", firstTile);
+            check("开始面板-悬浮图标放大后完整位于按钮内，按钮保持透明",
+                iconBounds.Width > icon.Width && new Rect(firstTile.RenderSize).Contains(iconBounds) &&
+                ((System.Windows.Media.SolidColorBrush)tileBorder.Background).Color.A == 0, "");
+            ToggleFilter(true);
+            var persisted = System.Text.Json.JsonSerializer.Deserialize<AppConfig>(System.Text.Json.JsonSerializer.Serialize(config))!;
+            check("开始面板-勾选后立即过滤并保存偏好，保持在所有应用页",
+                initialCount == 3 && AppTiles().Count() == 2 &&
+                persisted.LauncherHideGroupedApps && savedChanges == 1 && Math.Abs(AppsTop()) < 0.5, "");
+            ToggleFilter(false);
+            check("开始面板-取消勾选恢复所有应用",
+                AppTiles().Count() == initialCount &&
+                !config.LauncherHideGroupedApps && savedChanges == 2, "");
+
+            Wheel(120);
+            check("开始面板-向上滚动返回分组首屏",
+                scroll.VerticalOffset == 0 && AppsTop() >= scroll.ViewportHeight - 0.5, "");
+
+            void Wheel(int delta)
+            {
+                scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, delta)
+                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                FlushLayout();
+            }
+
+            IEnumerable<UIElement> AppTiles() => ((StackPanel)appBody.Content).Children
+                .OfType<System.Windows.Controls.Primitives.UniformGrid>().SelectMany(grid => grid.Children.Cast<UIElement>());
+
+            void ToggleFilter(bool enabled)
+            {
+                filter.IsChecked = enabled;
+                filter.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+                FlushLayout();
+            }
+
+            void FlushLayout()
+            {
+                root.Dispatcher.Invoke(() => root.UpdateLayout(), DispatcherPriority.ApplicationIdle);
+            }
         }
-        check("开始面板-圆盘分组容纳各组快捷方式",
-            layout.Sectors.Select(sector => sector.Slots.Count).SequenceEqual(counts),
-            string.Join(", ", layout.Sectors.Select(sector => sector.Slots.Count)));
-        check("开始面板-按排序从离圆心最近的位置向外分配图标",
-            layout.Sectors.All(sector =>
-            {
-                var distances = sector.Slots.Select(point => (point - layout.Center).Length).ToArray();
-                return distances.Zip(distances.Skip(1)).All(pair => pair.First <= pair.Second + 1e-6);
-            }), "");
-        check("开始面板-放射布局按数量分配角度且图标标签互不重叠",
-            layout.Sectors[3].Span > layout.Sectors[4].Span && layout.Sectors.All(sector =>
-            {
-                var bounds = sector.Slots.Select(PlaceFootprint).ToArray();
-                return bounds.SelectMany((first, index) => bounds.Skip(index + 1)
-                    .Select(second => first.FillContainsWithDetail(second) == IntersectionDetail.Empty)).All(separated => separated);
-            }), "");
-        check("开始面板-各层图标围绕扇区中轴线对称等距排列",
-            layout.Sectors.All(sector =>
-            {
-                var axis = sector.Title.TopLeft + new Vector(sector.Title.Width / 2, sector.Title.Height / 2) - layout.Center;
-                return sector.Slots.Select(point => point - layout.Center)
-                    .GroupBy(vector => Math.Round(vector.Length, 5)).All(ring =>
-                    {
-                        var row = ring.ToArray();
-                        var gaps = row.Zip(row.Skip(1)).Select(pair => (pair.Second - pair.First).Length).ToArray();
-                        return Math.Abs(Vector.AngleBetween(axis, row[0]) + Vector.AngleBetween(axis, row[^1])) < 1e-6 &&
-                            gaps.All(gap => Math.Abs(gap - gaps[0]) < 1e-6);
-                    });
-            }), "");
-        var work = layout.Sectors[0].Slots.Select(point => point - layout.Center).ToArray();
-        var rows = work.GroupBy(vector => Math.Round(vector.Length, 5)).ToArray();
-        check("开始面板-工作组从内向外连续排列，外圈可容纳更多图标",
-            rows.Length >= 3 && rows.Skip(1).Any(row => row.Count() > rows[0].Count()) &&
-            rows.Zip(rows.Skip(1)).All(pair => Math.Abs(pair.Second.Key - pair.First.Key - layout.Pitch) < 1e-5),
-            $"各排数量 {string.Join(", ", rows.Select(row => row.Count()))}");
-        check("开始面板-扇区独立留缝并为圆心搜索留位",
-            layout.Sectors.All(sector => !sector.Shape.FillContains(layout.Center) &&
-                !sector.Shape.FillContains(layout.Center + new Vector(0, -layout.Radius / 2)) &&
-                sector.Slots.All(point => sector.Shape.FillContains(point))), "");
-        check("开始面板-组名位于分区内侧，不遮挡搜索按钮或图标",
-            layout.Sectors.All(sector =>
-            {
-                var title = new RectangleGeometry(sector.Title);
-                var firstRing = (sector.Slots[0] - layout.Center).Length;
-                return (sector.Title.TopLeft + new Vector(sector.Title.Width / 2, sector.Title.Height / 2) - layout.Center).Length < firstRing &&
-                    sector.Shape.FillContainsWithDetail(title) == IntersectionDetail.FullyContains &&
-                    sector.Slots.All(point => title.FillContainsWithDetail(PlaceFootprint(point)) == IntersectionDetail.Empty);
-            }), "");
-
-        bool UsesSharedRings(LauncherWheelLayout.Layout wheel, int[] expectedCounts)
+        finally
         {
-            if (!wheel.Sectors.Select(sector => sector.Slots.Count).SequenceEqual(expectedCounts)) return false;
-            var firstRing = (wheel.Sectors[0].Slots[0] - wheel.Center).Length;
-            return wheel.Sectors.All(sector => sector.Slots.Select(point => (point - wheel.Center).Length)
-                .GroupBy(radius => Math.Round(radius, 5)).Select((ring, index) =>
-                    Math.Abs(ring.First() - firstRing - index * wheel.Pitch) < 1e-6).All(matches => matches));
+            window.Close();
         }
-
-        var narrowCounts = new[] { 25, 1, 1, 1, 8, 1, 1, 1, 4, 1, 1, 1 };
-        var narrow = LauncherWheelLayout.Arrange(new Size(1600, 1600), narrowCounts, 32, 4);
-        var sixCounts = new[] { 13, 8, 9, 16, 8, 11 };
-        var six = LauncherWheelLayout.Arrange(new Size(1260, 1180), sixCounts,
-            AppConfig.DefaultLauncherIconSize, AppConfig.DefaultLauncherLayerGap);
-        check("开始面板-六组和窄分区均从同一内圈连续向外排布",
-            UsesSharedRings(six, sixCounts) && UsesSharedRings(narrow, narrowCounts), "");
-        var titleRadii = six.Sectors.Select(sector =>
-            (sector.Title.TopLeft + new Vector(sector.Title.Width / 2, sector.Title.Height / 2) - six.Center).Length).ToArray();
-        check("开始面板-六组名称围绕圆心同圈排列，仅左右两侧竖排",
-            titleRadii.All(radius => Math.Abs(radius - titleRadii[0]) < 1e-6) &&
-            six.Sectors.Select(sector => sector.Title.Height > sector.Title.Width)
-                .SequenceEqual(new[] { false, true, false, false, true, false }) &&
-            six.Sectors.All(sector => sector.Shape.FillContainsWithDetail(new RectangleGeometry(sector.Title)) ==
-                IntersectionDetail.FullyContains), "");
-        var crowdedCounts = new[] { 36, 9, 22, 48, 8, 13 };
-        var crowdedViewport = new Size(720, 480);
-        var crowdedLabels = crowdedCounts.Select(count => Enumerable.Repeat(new Size(74, 28), count).ToArray()).ToArray();
-        var crowded = LauncherWheelLayout.Arrange(crowdedViewport, crowdedCounts,
-            AppConfig.DefaultLauncherIconSize, AppConfig.DefaultLauncherLayerGap, labels: crowdedLabels);
-        var canvasBounds = new Rect(crowded.CanvasSize);
-        check("开始面板-小视口按需增加层数并扩展画布，保留全部图标",
-            UsesSharedRings(crowded, crowdedCounts) && crowded.CanvasSize.Width > crowdedViewport.Width &&
-            crowded.CanvasSize.Height > crowdedViewport.Height && crowded.Sectors.All(sector =>
-                canvasBounds.Contains(sector.Title) && canvasBounds.Contains(sector.Shape.Bounds) &&
-                sector.Slots.All(point => sector.Shape.FillContains(point))) &&
-            crowded.Sectors.Max(sector => sector.Slots.Select(point => Math.Round((point - crowded.Center).Length, 5))
-                .Distinct().Count()) > 5, "");
-        var manyCounts = Enumerable.Repeat(2, 60).ToArray();
-        var manyLabels = manyCounts.Select(_ => new[] { new Size(16, 14), new Size(74, 28) }).ToArray();
-        var many = LauncherWheelLayout.Arrange(crowdedViewport, manyCounts, 32, 4, labels: manyLabels);
-        check("开始面板- 窄扇区后续的长标签也有连续的可用位置", UsesSharedRings(many, manyCounts), "");
-        var two = LauncherWheelLayout.Arrange(new Size(1100, 1100), new[] { 3, 28 }, 32, 4);
-        check("开始面板-两组按图标数量分配角度，超过半圆的扇区正确容纳图标",
-            two.Sectors[0].Span < Math.PI && two.Sectors[1].Span > Math.PI && UsesSharedRings(two, new[] { 3, 28 }) &&
-            two.Sectors.All(sector => sector.Slots.All(point => sector.Shape.FillContains(point))), "");
-
-        var sparse = LauncherWheelLayout.Arrange(new Size(1480, 1480), new[] { 1, 1, 1, 1, 1 }, 32, 4);
-        check("开始面板-最外图标层决定渐隐范围，图标标签不进入渐隐区",
-            sparse.Radius < layout.Radius && sparse.FadeStart < layout.FadeStart &&
-            layout.Sectors.SelectMany(sector => sector.Slots).All(point =>
-            {
-                var offset = (Vector)point - new Vector(layout.TileSize.Width / 2, layout.IconAnchor);
-                return footprint.Children.Select(child => child.Bounds).All(bounds =>
-                    new[] { bounds.TopLeft, bounds.TopRight, bounds.BottomLeft, bounds.BottomRight }
-                        .All(corner => (corner + offset - layout.Center).Length < layout.FadeStart));
-            }) && layout.FadeStart < layout.Radius, "");
-
-        var single = LauncherWheelLayout.Arrange(new Size(880, 880), new[] { 4 }, 32, 4);
-        var singleSlots = single.Sectors[0].Slots;
-        var circleGaps = singleSlots.Select((point, index) =>
-            (singleSlots[(index + 1) % singleSlots.Count] - point).Length).ToArray();
-        check("开始面板-单分组整圆相邻图标首尾等距",
-            circleGaps.Length == 4 && circleGaps.Min() >= Math.Min(single.TileSize.Width, single.TileSize.Height) - 1e-6 &&
-            circleGaps.Max() - circleGaps.Min() < 1e-6, "");
-        var widerGap = LauncherWheelLayout.Arrange(new Size(1260, 1180), sixCounts, AppConfig.DefaultLauncherIconSize, 24);
-        var largerIcons = LauncherWheelLayout.Arrange(new Size(1260, 1180), sixCounts, 60, AppConfig.DefaultLauncherLayerGap);
-        check("开始面板-图标大小和层间距按设置独立生效",
-            widerGap.TileSize == six.TileSize && widerGap.IconAnchor == six.IconAnchor &&
-            widerGap.Pitch - six.Pitch == 24 - AppConfig.DefaultLauncherLayerGap &&
-            largerIcons.IconAnchor - six.IconAnchor == (60 - AppConfig.DefaultLauncherIconSize) / 2.0, "");
-        var pen = new Pen(Brushes.White, 2);
-        var start = -Math.PI / 2;
-        var noOuterRim = layout.Sectors.All(sector =>
-        {
-            var middle = start + sector.Span / 2;
-            start += sector.Span;
-            var direction = new Vector(Math.Cos(middle), Math.Sin(middle));
-            return sector.Shape.FillContains(layout.Center + direction * (layout.Radius - 1)) &&
-                !sector.Outline.StrokeContains(pen, layout.Center + direction * layout.Radius);
-        });
-        check("开始面板-分区和单组圆盘均不绘制外缘描边",
-            noOuterRim && !single.Sectors[0].Outline.StrokeContains(pen, single.Center + new Vector(single.Radius, 0)) &&
-            single.Sectors[0].Outline.StrokeContains(pen, single.Center + new Vector(single.HubRadius + 9, 0)), "");
     }
 }

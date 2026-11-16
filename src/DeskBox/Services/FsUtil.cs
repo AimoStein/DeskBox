@@ -228,6 +228,23 @@ public static class FsUtil
 
     public static bool PathExists(string path) => File.Exists(path) || Directory.Exists(path);
 
+    internal static bool TryRevealInExplorer(string path)
+    {
+        if (ShellItemInterop.RevealItem(path)) return true;
+        try
+        {
+            using var explorer = Process.Start(new ProcessStartInfo("explorer.exe", $"/select,{Quote(path)}")
+                { UseShellExecute = true });
+            return true;
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            Log.Warn($"定位失败 {path}: {ex.Message}");
+            var directory = Path.GetDirectoryName(path);
+            return !string.IsNullOrEmpty(directory) && Directory.Exists(directory) && TryOpen(directory);
+        }
+    }
+
     public static void OpenFolder(string path)
     {
         try

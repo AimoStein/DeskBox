@@ -70,11 +70,10 @@ public static class VirtualGroups
         foreach (var entry in entries)
         {
             var path = Key(entry.Path);
-            var existing = config.Boxes.Where(box => box.IsVirtual)
-                .SelectMany(box => box.Entries)
-                .FirstOrDefault(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase));
+            var existing = References(config).FirstOrDefault(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase));
             foreach (var other in config.Boxes.Where(box => box.IsVirtual && box != target))
                 Remove(other, new[] { path });
+            config.LauncherUngroupedEntries.RemoveAll(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase));
             if (target.Entries.Any(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase))) continue;
             target.Entries.Add(new GroupEntry
             {
@@ -88,6 +87,34 @@ public static class VirtualGroups
         }
         return changed;
     }
+
+    internal static void MoveToUngrouped(AppConfig config, IEnumerable<GroupEntry> entries)
+    {
+        var paths = config.LauncherUngroupedEntries.Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var references = References(config).DistinctBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(entry => entry.Path, StringComparer.OrdinalIgnoreCase);
+        var moved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries)
+        {
+            if (string.IsNullOrWhiteSpace(entry.Path)) continue;
+            var path = Key(entry.Path);
+            moved.Add(path);
+            if (!paths.Add(path)) continue;
+            var reference = references.GetValueOrDefault(path);
+            config.LauncherUngroupedEntries.Add(new GroupEntry
+            {
+                Path = path,
+                DisplayName = string.IsNullOrWhiteSpace(entry.DisplayName) ? reference?.DisplayName ?? "" : entry.DisplayName,
+                ShortcutIdentity = entry.ShortcutIdentity ?? reference?.ShortcutIdentity,
+                ShortcutUpgradeIdentity = entry.ShortcutUpgradeIdentity ?? reference?.ShortcutUpgradeIdentity,
+            });
+        }
+        foreach (var box in config.Boxes.Where(box => box.IsVirtual))
+            Remove(box, moved);
+    }
+
+    internal static IEnumerable<GroupEntry> References(AppConfig config) =>
+        config.Boxes.Where(box => box.IsVirtual).SelectMany(box => box.Entries).Concat(config.LauncherUngroupedEntries);
 
     public static int Remove(BoxConfig box, IEnumerable<string> paths)
     {
@@ -104,14 +131,14 @@ public static class VirtualGroups
             !IsShell(path) && path.StartsWith(oldKey + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
                 ? newKey + path[oldKey.Length..] : path;
         var changed = false;
+        foreach (var entry in References(config))
+            if (Remap(entry.Path) is var replacement && replacement != entry.Path)
+            {
+                entry.Path = replacement;
+                changed = true;
+            }
         foreach (var box in config.Boxes.Where(box => box.IsVirtual))
         {
-            foreach (var entry in box.Entries)
-                if (Remap(entry.Path) is var replacement && replacement != entry.Path)
-                {
-                    entry.Path = replacement;
-                    changed = true;
-                }
             for (var i = 0; i < box.ItemOrder.Count; i++)
                 box.ItemOrder[i] = Remap(box.ItemOrder[i]);
         }
@@ -121,6 +148,14 @@ public static class VirtualGroups
             if (string.Equals(path, replacement, StringComparison.OrdinalIgnoreCase)) continue;
             config.LauncherOpenCounts.Remove(path);
             config.LauncherOpenCounts[replacement] = Math.Max(config.LauncherOpenCounts.GetValueOrDefault(replacement), count);
+            changed = true;
+        }
+        foreach (var (path, name) in config.LauncherDisplayNames.ToArray())
+        {
+            var replacement = Remap(path);
+            if (string.Equals(path, replacement, StringComparison.OrdinalIgnoreCase)) continue;
+            config.LauncherDisplayNames.Remove(path);
+            config.LauncherDisplayNames.TryAdd(replacement, name);
             changed = true;
         }
         // 外部重命名后，撤销分组仍应指向当前对象，而不是已经失效的旧名字。

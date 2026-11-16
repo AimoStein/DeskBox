@@ -213,7 +213,7 @@ public partial class App
     {
         if (_exiting) return;
         var programs = LauncherCatalog.ProgramsFolders().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var roots = _config.Boxes.Where(box => box.IsVirtual).SelectMany(box => box.Entries)
+        var roots = VirtualGroups.References(_config)
             .Where(entry => !VirtualGroups.IsShell(entry.Path))
             .Select(entry => Path.GetDirectoryName(entry.Path))
             .Concat(new[] { _shell.DesktopPath, _shell.PublicDesktopPath }).Concat(programs)
