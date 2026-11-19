@@ -1867,41 +1867,30 @@ public partial class App : Application
 
         _exiting = true;
         _saveTimer?.Stop();
-        _taskbar?.Dispose();
         SaveDesktopSnapshot();
-
-        if (!_launcherMode && _config.RestoreIconsOnExit && _config.IconsHiddenByApp)
-        {
-            _shell.SetIconsVisible(true);
-            _config.IconsHiddenByApp = false;
-        }
-
-        ConfigStore.Save(_config);
-
-        StopWatchingForeground();
-        _mouseWatcher?.Dispose();
-        _tray?.Dispose();
-
         Shutdown();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
         StopLauncher();
+        StopDesktopWatch();
+        _saveTimer?.Stop();
         _folderRecoveryTimer?.Stop();
         _updateTimer?.Stop();
-        _updates.Dispose();
         _taskbar?.Dispose();
-        Rendering.LiquidGlassEngine.Shutdown();
-        if (_ownsConfig && !_exiting)
+        if (_ownsConfig)
         {
+            _iconLayer?.RestoreDesktop(_shell);
+            _config.IconsHiddenByApp = false;
             ConfigStore.Save(_config);
             StopWatchingForeground();
             _mouseWatcher?.Dispose();
             _tray?.Dispose();
         }
 
-        StopDesktopWatch();
+        _updates.Dispose();
+        Rendering.LiquidGlassEngine.Shutdown();
         base.OnExit(e);
     }
 

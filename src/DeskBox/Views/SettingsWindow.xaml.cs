@@ -129,7 +129,6 @@ public partial class SettingsWindow : Window
             ChkDoubleClick.IsChecked = _config.HideIconsOnDoubleClick;
             ChkHideGroups.IsChecked = _config.HideBoxesWithIcons;
             ChkHideTaskbar.IsChecked = _config.HideTaskbarWithIcons;
-            ChkRestoreIcons.IsChecked = _config.RestoreIconsOnExit;
             ChkHidden.IsChecked = _config.ShowHiddenFiles;
             ChkShortcuts.IsChecked = _config.OrganizeShortcuts;
             ChkAlign.IsChecked = _config.AutoAlignBoxes;
@@ -230,7 +229,6 @@ public partial class SettingsWindow : Window
             _config.LauncherInterceptStartButton = ChkLauncherStartButton.IsChecked == true;
         }
         _config.HideTaskbarWithIcons = ChkHideTaskbar.IsChecked == true;
-        _config.RestoreIconsOnExit = ChkRestoreIcons.IsChecked == true;
         _config.ShowHiddenFiles = ChkHidden.IsChecked == true;
         _config.OrganizeShortcuts = ChkShortcuts.IsChecked == true;
         _config.AutoAlignBoxes = ChkAlign.IsChecked == true;

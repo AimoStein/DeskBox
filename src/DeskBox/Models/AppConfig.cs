@@ -14,6 +14,9 @@ public enum ThemeMode
 /// <summary>一个分区盒子的持久化状态。</summary>
 public sealed class BoxConfig
 {
+    internal const int DefaultLauncherColumns = 6;
+    internal const int MaxLauncherGridDimension = 12;
+
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Title { get; set; } = "新盒子";
 
@@ -23,6 +26,11 @@ public sealed class BoxConfig
     /// <summary>虚拟分组只记录原路径；Folder 仅保留为旧版内容的位置。</summary>
     public bool IsVirtual { get; set; }
     public List<GroupEntry> Entries { get; set; } = new();
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? LauncherSlot { get; set; } // Left-to-right order in the launcher.
+    public int LauncherColumns { get; set; } = DefaultLauncherColumns;
+    public int LauncherRows { get; set; } // Kept for older builds. Rows now follow the icon count.
 
     public double X { get; set; } = 120;
     public double Y { get; set; } = 120;
@@ -105,7 +113,6 @@ public sealed class AppConfig
     public bool HideIconsOnDoubleClick { get; set; } = true;
     public bool HideBoxesWithIcons { get; set; } = true;
     public bool HideTaskbarWithIcons { get; set; } = true;
-    public bool RestoreIconsOnExit { get; set; } = true;
     public bool ShowHiddenFiles { get; set; }
     public bool OrganizeShortcuts { get; set; }
 
@@ -311,6 +318,8 @@ public static class ConfigStore
         {
             box.Entries ??= new();
             box.ItemOrder ??= new();
+            box.LauncherColumns = Math.Clamp(box.LauncherColumns, 1, BoxConfig.MaxLauncherGridDimension);
+            box.LauncherRows = Math.Clamp(box.LauncherRows, 0, BoxConfig.MaxLauncherGridDimension);
             if (box.Width < 180) box.Width = 180;
             if (box.Height < 120) box.Height = 120;
             if (string.IsNullOrWhiteSpace(box.Title)) box.Title = "新盒子";

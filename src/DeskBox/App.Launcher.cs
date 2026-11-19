@@ -169,7 +169,12 @@ public partial class App
         ScheduleSave();
     }
 
-    private void RefreshLauncher() => _launcher?.SetSections(_launcherCatalog.Sections(_config));
+    private void RefreshLauncher()
+    {
+        if (_launcher is null) return;
+        if (LauncherGroupBoard.AssignSlots(_config.Boxes) && _ownsConfig) ScheduleSave();
+        _launcher.SetSections(_launcherCatalog.Sections(_config));
+    }
 
     private void RemoveLauncherShortcut(string path)
     {

@@ -501,15 +501,7 @@
                                                 <TextBlock Text="同时隐藏任务栏" Style="{StaticResource RowLabel}" />
                                                 <CheckBox x:Name="ChkHideTaskbar" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="同时隐藏任务栏" />
                                             </Grid>
-                                            <Grid Margin="0,0,0,18">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="Auto" />
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="退出时恢复桌面图标" Style="{StaticResource RowLabel}" />
-                                                <CheckBox x:Name="ChkRestoreIcons" Grid.Column="1" Style="{StaticResource SwitchCheck}" Checked="Toggle_Changed" Unchecked="Toggle_Changed" AutomationProperties.Name="退出时恢复桌面图标" />
-                                            </Grid>
-                                            <TextBlock Text="关闭“同时隐藏分组”，可隐藏桌面原图标并继续使用分组。" Style="{StaticResource Caption}" />
+                                            <TextBlock Text="关闭“同时隐藏分组”，可隐藏桌面原图标并继续使用分组。退出简桌时会显示桌面图标。" Style="{StaticResource Caption}" />
                                         </StackPanel>
                                     </Border>
                                 </Grid>

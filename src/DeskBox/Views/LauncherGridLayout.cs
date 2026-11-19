@@ -1,127 +1,191 @@
 using System.Windows;
+using DeskBox.Models;
 using DeskBox.Services;
 
 namespace DeskBox.Views;
 
-internal readonly record struct LauncherGridLayout(int IconSize, int GroupColumns, int Gap)
+internal readonly record struct LauncherGridLayout(int IconSize, int Gap)
 {
     internal const int CardPadding = 12;
     internal const int HeadingHeight = 32;
     internal const int HoverInset = 4;
-    private const int MinimumIconSize = 32;
-    private const int MaximumGroupColumns = 4;
+    internal const int EmptyUngroupedHeight = 44;
+    private const double WindowHorizontalSpace = 48;
+    private const double WindowVerticalSpace = 98;
+    private const int PreferredMinimumWidth = 640;
 
     internal double TileWidth => Math.Max(76, IconSize + 20);
     internal double TileHeight => IconSize + 40 + 2 * HoverInset;
 
-    internal int TileColumns(double cardWidth) =>
-        Math.Max(1, (int)((cardWidth - 2 * CardPadding) / TileWidth));
+    internal int TileColumns(double cardWidth) => Math.Max(1, (int)((cardWidth - 2 * CardPadding) / TileWidth));
 
-    internal double CardWidth(double width, int columns) => (width - (columns - 1) * Gap) / columns;
+    internal static int MaxGroupColumns(int items) => Math.Clamp(items, 1, BoxConfig.MaxLauncherGridDimension);
 
-    internal static Size MeasureViewport(Size available, IReadOnlyList<LaunchSection> groups, int preferredIconSize, int gap)
+    internal static int GroupColumns(LaunchSection section) =>
+        Math.Clamp(section.Group!.LauncherColumns, 1, MaxGroupColumns(section.Items.Count));
+
+    internal Size GroupSize(LaunchSection section) => GroupSize(section.Items.Count, GroupColumns(section));
+
+    internal Size GroupSize(int items, int columns)
     {
-        var minWidth = Math.Min(380, available.Width);
-        var minHeight = Math.Min(72, available.Height);
-        var widestLayout = Fit(available, groups, preferredIconSize, gap);
-        if (widestLayout.TotalHeight(available.Width, groups) > available.Height) return available;
-        var best = new Size(available.Width, minHeight);
-        var bestScore = double.PositiveInfinity;
-        var bestWidthDeficit = int.MaxValue;
+        var rows = RowsFor(items, columns);
+        return new Size(Math.Max(120, 2 * CardPadding + columns * TileWidth),
+            2 * CardPadding + HeadingHeight + (rows > 0 ? rows * TileHeight : 24));
+    }
 
-        // Rows change height only when a card gains another tile column.
-        var widths = new SortedSet<double> { minWidth, available.Width };
-        var cardCount = groups.Count(section => !IsEmptyUngrouped(section));
-        for (var cards = 1; cards <= Math.Min(MaximumGroupColumns, cardCount); cards++)
+    internal int ResizeGroup(LaunchSection section, Vector delta)
+    {
+        var items = section.Items.Count;
+        var columns = GroupColumns(section);
+        var dx = delta.X / TileWidth;
+        var dy = delta.Y / TileHeight;
+        var desiredColumns = Math.Clamp(columns + dx, 1, MaxGroupColumns(items));
+        var desiredRows = Math.Clamp(RowsFor(items, columns) + dy, 0, items);
+
+        // Along an axis, match that dimension first. On a diagonal, choose the nearest valid shape.
+        (double Primary, double Secondary) Distance(int candidate)
         {
-            for (var tiles = 1; ; tiles++)
-            {
-                var cardWidth = Math.Max(180, 2 * CardPadding + tiles * widestLayout.TileWidth) + 1;
-                var width = cards * cardWidth + (cards - 1) * gap;
-                if (width > available.Width) break;
-                if (width >= minWidth) widths.Add(width);
-            }
+            var x = Math.Abs(candidate - desiredColumns);
+            var y = Math.Abs(RowsFor(items, candidate) - desiredRows);
+            if (Math.Abs(dx) < 0.5) return (y, x);
+            if (Math.Abs(dy) < 0.5) return (x, y);
+            return (x * x + y * y, x);
         }
 
-        foreach (var width in widths)
+        var best = columns;
+        var bestDistance = Distance(best);
+        for (var candidate = 1; candidate <= MaxGroupColumns(items); candidate++)
         {
-            var layout = Fit(new Size(width, available.Height), groups, widestLayout.IconSize, gap);
-            var (contentHeight, unusedHeight, widthDeficit) = layout.MeasureGroups(width, groups);
-            if (layout.IconSize != widestLayout.IconSize || contentHeight > available.Height) continue;
-            var height = Math.Max(contentHeight, minHeight);
-            var score = width * (height + unusedHeight) + 0.25 * Math.Pow(width - 1.55 * height, 2);
-            if (widthDeficit > bestWidthDeficit || (widthDeficit == bestWidthDeficit && score >= bestScore)) continue;
-            best = new Size(width, height);
-            bestScore = score;
-            bestWidthDeficit = widthDeficit;
+            var distance = Distance(candidate);
+            if (distance.CompareTo(bestDistance) >= 0) continue;
+            best = candidate;
+            bestDistance = distance;
         }
         return best;
     }
 
-    internal static LauncherGridLayout Fit(Size viewport, IReadOnlyList<LaunchSection> groups, int preferredIconSize, int gap)
+    internal Size MeasureWindow(Size available, LauncherGroupBoard board, LaunchSection? ungrouped)
     {
-        var best = new LauncherGridLayout(preferredIconSize, 1, gap);
-        var bestScore = (Overflow: double.PositiveInfinity, WidthDeficit: int.MaxValue,
-            Height: double.PositiveInfinity, UnusedHeight: double.PositiveInfinity);
-        var mostColumns = Math.Clamp((int)((viewport.Width + gap) / (180 + gap)), 1, MaximumGroupColumns);
-        mostColumns = Math.Min(mostColumns, Math.Max(1, groups.Count(section => !IsEmptyUngrouped(section))));
-        for (var icon = preferredIconSize; icon >= MinimumIconSize; icon--)
-        {
-            for (var columns = mostColumns; columns >= 1; columns--)
-            {
-                var layout = new LauncherGridLayout(icon, columns, gap);
-                var (height, unusedHeight, widthDeficit) = layout.MeasureGroups(viewport.Width, groups);
-                var score = (Math.Max(0, height - viewport.Height), widthDeficit, height, unusedHeight);
-                if (score.CompareTo(bestScore) >= 0) continue;
-                best = layout;
-                bestScore = score;
-            }
-            if (bestScore.Overflow == 0) break;
-        }
-        return best;
+        var width = Math.Min(available.Width, Math.Max(PreferredMinimumWidth, board.Width + WindowHorizontalSpace));
+        var viewportWidth = Math.Max(1, width - WindowHorizontalSpace);
+        var overview = OverviewSize(viewportWidth, board, ungrouped);
+        var height = WindowVerticalSpace + overview.Height * (viewportWidth / overview.Width);
+        return new Size(width, Math.Min(available.Height, Math.Ceiling(height)));
     }
 
-    internal double TotalHeight(double width, IReadOnlyList<LaunchSection> groups) => MeasureGroups(width, groups).Height;
-
-    private (double Height, double UnusedHeight, int WidthDeficit) MeasureGroups(double width, IReadOnlyList<LaunchSection> groups)
+    internal Size OverviewSize(double viewportWidth, LauncherGroupBoard board, LaunchSection? ungrouped)
     {
-        Span<double> heights = stackalloc double[GroupColumns];
-        heights.Clear();
-        var tileColumns = TileColumns(CardWidth(width, GroupColumns));
-        var index = 0;
-        var widthDeficit = 0;
-        var emptyUngrouped = false;
-        foreach (var group in groups)
+        var width = Math.Max(viewportWidth, board.Width);
+        var height = board.Height;
+        if (ungrouped is not null)
         {
-            if (IsEmptyUngrouped(group))
-            {
-                emptyUngrouped = true;
-                continue;
-            }
-            var column = index++ % GroupColumns;
-            if (heights[column] > 0) heights[column] += Gap;
-            var count = group.Items.Count;
-            heights[column] += CardHeight(count, tileColumns);
-            // To have fewer rows than columns, c columns must hold all items in c - 1 rows.
-            var wideColumns = Math.Min(count, (int)Math.Ceiling((1 + Math.Sqrt(1 + 4.0 * count)) / 2));
-            widthDeficit += Math.Max(0, wideColumns - tileColumns);
+            if (board.Cards.Count > 0) height += Gap;
+            height += ungrouped.Items.Count == 0 ? EmptyUngroupedHeight :
+                2 * CardPadding + HeadingHeight + RowsFor(ungrouped.Items.Count, TileColumns(width)) * TileHeight;
         }
-        var height = 0.0;
-        var total = 0.0;
-        foreach (var column in heights)
-        {
-            height = Math.Max(height, column);
-            total += column;
-        }
-        var unusedHeight = height - total / GroupColumns;
-        return (height + (emptyUngrouped ? EmptyUngroupedHeight + (index > 0 ? Gap : 0) : 0), unusedHeight, widthDeficit);
+        return new Size(width, height);
     }
 
-    internal const int EmptyUngroupedHeight = 44;
+    internal static int RowsFor(int items, int columns) => (int)Math.Ceiling(items / (double)columns);
+}
 
-    internal static bool IsEmptyUngrouped(LaunchSection section) =>
-        section.Group is null && section.Name == "未分组" && section.Items.Count == 0;
+internal sealed class LauncherGroupBoard
+{
+    internal readonly record struct Card(LaunchSection Section, Rect Bounds);
+    private readonly int _gap;
+    private readonly int _firstRowCount;
 
-    private double CardHeight(int items, int columns) => 2 * CardPadding + HeadingHeight +
-        (items == 0 ? 24 : Math.Ceiling(items / (double)columns) * TileHeight);
+    internal LauncherGroupBoard(IEnumerable<LaunchSection> groups, LauncherGridLayout layout)
+        : this(groups.Where(section => section.Group is not null).OrderBy(section => Order(section.Group!))
+            .Select(section => new Card(section, new Rect(new Point(), layout.GroupSize(section)))).ToArray(), layout.Gap)
+    {
+    }
+
+    private LauncherGroupBoard(Card[] cards, int gap)
+    {
+        _gap = gap;
+        _firstRowCount = (cards.Length + 1) / 2;
+        Pack(cards);
+        Cards = cards;
+        Width = cards.Length == 0 ? 0 : cards.Max(card => card.Bounds.Right);
+        Height = cards.Length == 0 ? 0 : cards.Max(card => card.Bounds.Bottom);
+    }
+
+    internal IReadOnlyList<Card> Cards { get; }
+    internal double Width { get; }
+    internal double Height { get; }
+
+    internal LauncherGroupBoard ResizeCard(int slot, Size size)
+    {
+        var cards = Cards.ToArray();
+        cards[slot] = cards[slot] with { Bounds = new Rect(new Point(), size) };
+        return new LauncherGroupBoard(cards, _gap);
+    }
+
+    internal (int Slot, Rect Bounds)? Snap(Point point, int sourceSlot)
+    {
+        if (sourceSlot < 0 || sourceSlot >= Cards.Count ||
+            point.X < 0 || point.X > Width || point.Y < 0 || point.Y > Height) return null;
+        var secondRow = _firstRowCount < Cards.Count && point.Y >= Cards[_firstRowCount].Bounds.Top - _gap / 2.0;
+        var target = secondRow ? _firstRowCount : 0;
+        var last = (secondRow ? Cards.Count : _firstRowCount) - 1;
+        while (target < last && point.X > Cards[target].Bounds.Right + _gap / 2.0) target++;
+        if (target == sourceSlot) return (target, Cards[target].Bounds);
+
+        var preview = Cards.ToArray();
+        (preview[sourceSlot], preview[target]) = (preview[target], preview[sourceSlot]);
+        Pack(preview);
+        return (target, preview[target].Bounds);
+    }
+
+    internal int? Neighbor(int slot, int dx, int dy)
+    {
+        var row = slot < _firstRowCount ? 0 : 1;
+        var column = slot - row * _firstRowCount + dx;
+        row += dy;
+        var target = row * _firstRowCount + column;
+        return row is 0 or 1 && column >= 0 && column < _firstRowCount && target < Cards.Count ? target : null;
+    }
+
+    private void Pack(Card[] cards)
+    {
+        var left = 0.0;
+        var top = 0.0;
+        var rowHeight = 0.0;
+        for (var slot = 0; slot < cards.Length; slot++)
+        {
+            if (slot == _firstRowCount)
+            {
+                left = 0;
+                top = rowHeight + _gap;
+            }
+            var size = cards[slot].Bounds.Size;
+            cards[slot] = cards[slot] with { Bounds = new Rect(new Point(left, top), size) };
+            left += size.Width + _gap;
+            rowHeight = Math.Max(rowHeight, size.Height);
+        }
+    }
+
+    internal static bool AssignSlots(IEnumerable<BoxConfig> groups)
+    {
+        // Preserve the reading order from earlier layouts while compacting slots.
+        var ordered = groups.OrderBy(Order).ToArray();
+        var changed = false;
+        for (var slot = 0; slot < ordered.Length; slot++)
+        {
+            if (ordered[slot].LauncherSlot == slot) continue;
+            ordered[slot].LauncherSlot = slot;
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static long Order(BoxConfig group) => group.LauncherSlot is >= 0 ? group.LauncherSlot.Value : long.MaxValue;
+
+    internal static void MoveTo(IEnumerable<BoxConfig> groups, BoxConfig group, int slot)
+    {
+        if (groups.FirstOrDefault(other => other.LauncherSlot == slot) is not { } occupant) return;
+        occupant.LauncherSlot = group.LauncherSlot;
+        group.LauncherSlot = slot;
+    }
 }

@@ -2,7 +2,7 @@ using DeskBox.Interop;
 
 namespace DeskBox.Services;
 
-/// <summary>接管 Explorer 的图标列表。只改窗口可见性，退出时恢复当初可见的窗口。</summary>
+/// <summary>运行期间接管 Explorer 的图标列表，退出时交还给 Explorer。</summary>
 internal sealed class DesktopIconLayer : IDisposable
 {
     private IntPtr _hidden;
@@ -26,6 +26,19 @@ internal sealed class DesktopIconLayer : IDisposable
             _explorerPid = pid;
         }
         return !NativeMethods.IsWindowVisible(list);
+    }
+
+    internal void RestoreDesktop(DesktopShell shell)
+    {
+        Dispose();
+        shell.SetIconsVisible(true);
+
+        // Explorer may have recreated the list, or it may already have been hidden at startup.
+        var view = NativeMethods.FindDesktopDefView();
+        if (view == IntPtr.Zero) return;
+        var list = NativeMethods.FindWindowEx(view, IntPtr.Zero, "SysListView32", null);
+        if (list != IntPtr.Zero && !NativeMethods.IsWindowVisible(list))
+            NativeMethods.ShowWindowAsync(list, NativeMethods.SW_SHOWNOACTIVATE);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.Synchronized)]

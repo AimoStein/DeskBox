@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 using DeskBox.Interop;
 using DeskBox.Models;
@@ -138,6 +139,52 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
         items.OrderByDescending(item => config.LauncherOpenCounts.GetValueOrDefault(item.Path))
             .ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(item => item.Path, StringComparer.OrdinalIgnoreCase);
+
+    internal static LaunchEntry[] Search(IEnumerable<LaunchEntry> items, string query, AppConfig config)
+    {
+        query = query.Trim();
+        var compare = CultureInfo.CurrentCulture.CompareInfo;
+        var compactQuery = WithoutSeparators(query);
+        return items.DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(item => (Item: item, Match: MatchName(item.Name, query, compactQuery, compare)))
+            .Where(result => result.Match != NameMatch.None)
+            .GroupBy(result => result.Match)
+            .OrderByDescending(group => group.Key)
+            .SelectMany(group => OrderByUsage(group.Select(result => result.Item), config))
+            .ToArray();
+    }
+
+    private enum NameMatch { None, Initials, Contains, Prefix, CompactExact, Exact }
+
+    private static NameMatch MatchName(string name, string query, string compactQuery, CompareInfo compare)
+    {
+        if (query.Length == 0) return NameMatch.None;
+
+        const CompareOptions options = CompareOptions.IgnoreCase | CompareOptions.IgnoreWidth;
+        if (compare.Compare(name, query, options) == 0) return NameMatch.Exact;
+
+        // Microsoft Pinyin can insert apostrophes between uncommitted syllables, e.g. b'l.
+        var compactName = WithoutSeparators(name);
+        if (compactQuery.Length > 0 && compare.Compare(compactName, compactQuery, options) == 0)
+            return NameMatch.CompactExact;
+        if (compare.IsPrefix(name, query, options) ||
+            (compactQuery.Length > 0 && compare.IsPrefix(compactName, compactQuery, options))) return NameMatch.Prefix;
+        if (compare.IndexOf(name, query, options) >= 0 ||
+            (compactQuery.Length > 0 && compare.IndexOf(compactName, compactQuery, options) >= 0)) return NameMatch.Contains;
+        if (compactQuery.Length < 2) return NameMatch.None;
+
+        var initials = new string(name.Where((character, index) => char.IsLetterOrDigit(character) &&
+            (index == 0 || !char.IsLetterOrDigit(name[index - 1]) ||
+                (char.IsUpper(character) && char.IsLower(name[index - 1])))).ToArray());
+        return compare.IsPrefix(initials, compactQuery, options) ? NameMatch.Initials : NameMatch.None;
+    }
+
+    private static string WithoutSeparators(string text) => text.Any(IsSearchSeparator)
+        ? new string(text.Where(character => !IsSearchSeparator(character)).ToArray()) : text;
+
+    private static bool IsSearchSeparator(char character) => char.IsWhiteSpace(character) ||
+        character is '\'' or '‘' or '’' or 'ʼ' or '＇' or '·' ||
+        char.GetUnicodeCategory(character) is UnicodeCategory.DashPunctuation or UnicodeCategory.ConnectorPunctuation;
 
     private static LaunchEntry WithDisplayName(LaunchEntry item, AppConfig config) =>
         config.LauncherDisplayNames.TryGetValue(item.Path, out var name) ? item with { Name = name } : item;

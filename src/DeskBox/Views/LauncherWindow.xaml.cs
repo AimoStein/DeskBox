@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -21,8 +22,6 @@ internal partial class LauncherWindow : Window
 {
     private const string EntryFormat = "DeskBox.LauncherEntry";
     private const double TaskbarGap = 8;
-    internal const double PanelHorizontalSpace = 48; // Content margins and scrollbar gutter.
-    internal const double PanelVerticalSpace = 98; // Content margins and toolbar.
     internal const double ScrollbarGutter = 16;
     private static readonly Brush TextBrush = MakeBrush(255, 241, 244, 247);
     private static readonly Brush DimBrush = MakeBrush(255, 167, 177, 190);
@@ -33,12 +32,14 @@ internal partial class LauncherWindow : Window
     private readonly DispatcherTimer _scrollbarTimer = new() { Interval = TimeSpan.FromMilliseconds(650) };
     private IReadOnlyList<LaunchSection> _sections = Array.Empty<LaunchSection>();
     private StackPanel? _groupsPage;
-    private ContextMenu? _openEntryMenu;
+    private Action? _populateAppsPage;
+    private ContextMenu? _openContextMenu;
     private TextBox? _nameEditor;
     private Action<bool>? _finishRename;
     private static readonly Lazy<string[]> ProgramsFolders = new(LauncherCatalog.ProgramsFolders);
     private LaunchEntry? _firstResult;
-    private BoxConfig? _groupToReveal;
+    private (string Before, string Preview)? _searchComposition;
+    private bool _searchRefreshQueued;
     private bool _interacting;
     private bool _draggingEntries;
     private bool _sectionVisualsDirty;
@@ -46,7 +47,7 @@ internal partial class LauncherWindow : Window
     private LauncherColor? _backgroundColor;
     private SettingsWindow? _dockedSettings;
 
-    internal bool IsSessionActive => IsActive || _openEntryMenu is not null || _dockedSettings?.IsActive == true;
+    internal bool IsSessionActive => IsActive || _openContextMenu is not null || _dockedSettings?.IsActive == true;
 
     internal event Action? ConfigChanged;
     internal event Action? UsageChanged;
@@ -64,12 +65,11 @@ internal partial class LauncherWindow : Window
             var bounds = new Rect(PanelRoot.RenderSize);
             PanelRoot.Clip = new RectangleGeometry(bounds, 24, 24);
         };
-        Search.TextChanged += (_, _) =>
-        {
-            ItemsScroll.ScrollToTop();
-            if (Search.Text.Trim().Length == 0) ResizeOverview();
-            Render();
-        };
+        Search.TextChanged += (_, _) => QueueSearchRefresh();
+        TextCompositionManager.AddPreviewTextInputStartHandler(Search, OnSearchComposition);
+        TextCompositionManager.AddPreviewTextInputUpdateHandler(Search, OnSearchComposition);
+        Search.PreviewTextInput += (_, _) => EndSearchComposition();
+        Search.LostKeyboardFocus += (_, _) => EndSearchComposition();
         ItemsScroll.SizeChanged += (_, _) => Render();
         ItemsScroll.PreviewMouseWheel += OnOverviewMouseWheel;
         ItemsScroll.ScrollChanged += OnScrollChanged;
@@ -93,11 +93,13 @@ internal partial class LauncherWindow : Window
         Deactivated += (_, _) => Dispatcher.BeginInvoke(() =>
         {
             if (!preview && IsVisible && !IsActive && !_interacting && _dockedSettings is null &&
-                _openEntryMenu is null) Hide();
+                _openContextMenu is null) Hide();
         });
         IsVisibleChanged += (_, _) =>
         {
             if (IsVisible) return;
+            _groupGesture?.CancelDrag();
+            EndSearchComposition();
             HideScrollbar(fade: false);
             ItemsScroll.ScrollToTop();
             _finishRename?.Invoke(true);
@@ -108,9 +110,12 @@ internal partial class LauncherWindow : Window
 
     internal void Open(POINT? anchor = null)
     {
+        Search.Clear();
+        ItemsScroll.ScrollToTop();
         if (IsVisible)
         {
             Activate();
+            Search.Focus();
             return;
         }
         var foreground = NativeMethods.GetForegroundWindow();
@@ -123,12 +128,10 @@ internal partial class LauncherWindow : Window
             var screen = WinForms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y));
             PositionNearTaskbar(screen, DpiScale(MonitorFromPoint(point, 2)));
         }
-        Search.Clear();
-        ItemsScroll.ScrollToTop();
         Topmost = true;
         Show();
         Activate();
-        Keyboard.Focus(PanelRoot);
+        Search.Focus();
     }
 
     internal void DockSettings(SettingsWindow settings)
@@ -211,17 +214,16 @@ internal partial class LauncherWindow : Window
     private (int Width, int Height) MeasureLauncher(int width, int height, double scale)
     {
         var margin = (int)Math.Round(18 * scale);
-        var available = new Size(Math.Max(1, Math.Floor((width - 2 * margin) / scale) - PanelHorizontalSpace),
-            Math.Max(1, Math.Floor((height - 2 * margin) / scale) - PanelVerticalSpace));
-        var viewport = LauncherGridLayout.MeasureViewport(available, OverviewGroups(),
-            _config.LauncherIconSize, _config.LauncherLayerGap);
-        return ((int)Math.Ceiling((viewport.Width + PanelHorizontalSpace) * scale),
-            (int)Math.Ceiling((viewport.Height + PanelVerticalSpace) * scale));
+        var available = new Size(Math.Max(1, Math.Floor((width - 2 * margin) / scale)),
+            Math.Max(1, Math.Floor((height - 2 * margin) / scale)));
+        var layout = new LauncherGridLayout(_config.LauncherIconSize, _config.LauncherLayerGap);
+        var window = layout.MeasureWindow(available, new LauncherGroupBoard(_sections, layout), UngroupedSection());
+        return ((int)Math.Ceiling(window.Width * scale), (int)Math.Ceiling(window.Height * scale));
     }
 
     private void ResizeOverview()
     {
-        if (!IsVisible || Search.Text.Trim().Length != 0) return;
+        if (!IsVisible || _groupGesture is not null || !string.IsNullOrWhiteSpace(SearchText)) return;
         if (_dockedSettings is { IsVisible: true } settings)
             PositionDockedSettings(settings);
         else
@@ -259,17 +261,21 @@ internal partial class LauncherWindow : Window
 
     private void QueueSectionRefresh()
     {
-        if (!_sectionVisualsDirty || _draggingEntries || _sectionRefreshQueued || _openEntryMenu is not null || _nameEditor is not null) return;
+        if (!_sectionVisualsDirty || _sectionRefreshQueued || SectionRefreshPaused) return;
         _sectionRefreshQueued = true;
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() =>
         {
             _sectionRefreshQueued = false;
-            if (!_sectionVisualsDirty || _draggingEntries || _openEntryMenu is not null || _nameEditor is not null) return;
+            if (!_sectionVisualsDirty || SectionRefreshPaused) return;
             _sectionVisualsDirty = false;
+            var (width, height) = (Width, Height);
             ResizeOverview();
-            Render();
+            if (Width == width && Height == height) Render();
         }));
     }
+
+    private bool SectionRefreshPaused => _draggingEntries || _groupGesture is not null ||
+        _openContextMenu is not null || _nameEditor is not null;
 
     internal void RefreshAppearance()
     {
@@ -278,17 +284,61 @@ internal partial class LauncherWindow : Window
         Render();
     }
 
+    private string SearchText => _searchComposition is { } composition && Search.Text == composition.Before
+        ? composition.Preview : Search.Text;
+
+    private void OnSearchComposition(object sender, TextCompositionEventArgs e)
+    {
+        if (e.TextComposition is not FrameworkTextComposition composition) return;
+
+        // WPF raises this event before it applies the IME's replacement to the TextBox.
+        var text = Search.Text;
+        var offset = composition.CompositionOffset;
+        var length = composition.CompositionLength;
+        var preview = offset >= 0 && length >= 0 && offset <= text.Length - length
+            ? text.Remove(offset, length).Insert(offset, composition.CompositionText) : text;
+        _searchComposition = (text, preview);
+        QueueSearchRefresh();
+    }
+
+    private void EndSearchComposition()
+    {
+        if (_searchComposition is null) return;
+        _searchComposition = null;
+        QueueSearchRefresh();
+    }
+
+    private void QueueSearchRefresh()
+    {
+        if (_searchRefreshQueued) return;
+        _searchRefreshQueued = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+        {
+            _searchRefreshQueued = false;
+            ItemsScroll.ScrollToTop();
+            ResizeOverview();
+            Render();
+        }));
+    }
+
     private void Render()
     {
+        if (_groupGesture is not null)
+        {
+            _sectionVisualsDirty = true;
+            return;
+        }
         _finishRename?.Invoke(true);
         var viewport = new Size(Math.Max(0, ItemsScroll.ActualWidth - ScrollbarGutter), ItemsScroll.ActualHeight);
         if (viewport.Width < 100 || viewport.Height < 1) return;
 
-        var query = Search.Text.Trim();
-        SearchHint.Visibility = Search.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var text = SearchText;
+        var query = text.Trim();
+        SearchHint.Visibility = text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         Cards.Width = viewport.Width;
         Cards.Children.Clear();
         _groupsPage = null;
+        _populateAppsPage = null;
         _firstResult = null;
         if (query.Length == 0)
         {
@@ -296,14 +346,10 @@ internal partial class LauncherWindow : Window
             return;
         }
 
-        var candidates = _sections.SelectMany(section => section.Items)
-            .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
-            .Where(item => item.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase));
-        var matches = LauncherCatalog.OrderByUsage(candidates, _config)
-            .OrderByDescending(item => item.Name.StartsWith(query, StringComparison.CurrentCultureIgnoreCase)).ToArray();
+        var matches = LauncherCatalog.Search(_sections.SelectMany(section => section.Items), query, _config);
         _firstResult = matches.FirstOrDefault();
         var search = new LaunchSection(null, "搜索结果", matches);
-        var layout = new LauncherGridLayout(_config.LauncherIconSize, 1, _config.LauncherLayerGap);
+        var layout = new LauncherGridLayout(_config.LauncherIconSize, _config.LauncherLayerGap);
         Cards.Children.Add(BuildCard(search, layout, viewport.Width, emptyMessage: "没有匹配的项目"));
     }
 
@@ -316,57 +362,73 @@ internal partial class LauncherWindow : Window
         }
 
         var installed = _sections.FirstOrDefault(IsAllApps);
-        var groups = OverviewGroups();
-        var layout = LauncherGridLayout.Fit(viewport, groups, _config.LauncherIconSize, _config.LauncherLayerGap);
-        var groupsPage = new StackPanel { MinHeight = viewport.Height };
+        var layout = new LauncherGridLayout(_config.LauncherIconSize, _config.LauncherLayerGap);
+        var board = new LauncherGroupBoard(_sections, layout);
+        var ungrouped = UngroupedSection();
+        var natural = layout.OverviewSize(viewport.Width, board, ungrouped);
+        var ungroupedHeight = natural.Height - board.Height;
+        var groupsPage = new StackPanel { Height = viewport.Height };
         Cards.Children.Add(groupsPage);
-        var grid = new Grid();
-        var columns = new StackPanel[layout.GroupColumns];
-        for (var index = 0; index < columns.Length; index++)
+        var overview = new StackPanel();
+        var viewbox = new Viewbox
         {
-            if (index > 0) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(layout.Gap) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition());
-            columns[index] = new StackPanel();
-            Grid.SetColumn(columns[index], index * 2);
-            grid.Children.Add(columns[index]);
-        }
-        groupsPage.Children.Add(grid);
-        var width = layout.CardWidth(viewport.Width, columns.Length);
-        var cardIndex = 0;
-        foreach (var section in groups)
+            Child = overview, StretchDirection = StretchDirection.DownOnly, HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        groupsPage.Children.Add(viewbox);
+        var surface = new Canvas();
+        foreach (var placement in board.Cards)
         {
-            if (LauncherGridLayout.IsEmptyUngrouped(section))
-            {
-                groupsPage.Children.Add(BuildEmptyUngrouped(section.Name, cardIndex > 0 ? layout.Gap : 0));
-                continue;
-            }
-            var column = columns[cardIndex++ % columns.Length];
-            var card = BuildCard(section, layout, width, ungrouped: section.Group is null);
-            if (column.Children.Count > 0) card.Margin = new Thickness(0, layout.Gap, 0, 0);
-            column.Children.Add(card);
-            if (_groupToReveal is not null && section.Group == _groupToReveal)
-            {
-                _groupToReveal = null;
-                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() => card.BringIntoView()));
-            }
+            surface.Children.Add(BuildCard(placement.Section, layout, placement.Bounds.Width,
+                groupBoard: (surface, board, ArrangeOverview)));
         }
+        if (board.Cards.Count > 0) overview.Children.Add(surface);
+
+        if (ungrouped is not null)
+        {
+            var gap = board.Cards.Count > 0 ? layout.Gap : 0;
+            var card = ungrouped.Items.Count == 0 ? BuildEmptyUngrouped(ungrouped.Name) :
+                BuildCard(ungrouped, layout, natural.Width, ungrouped: true);
+            card.Margin = new Thickness(0, gap, 0, 0);
+            overview.Children.Add(card);
+        }
+        ArrangeOverview(board);
 
         if (installed is null) return;
         _groupsPage = groupsPage;
         var appsPage = new StackPanel { MinHeight = viewport.Height };
-        var appsLayout = new LauncherGridLayout(_config.LauncherIconSize, 1, _config.LauncherLayerGap);
-        appsPage.Children.Add(BuildCard(installed, appsLayout, viewport.Width));
         Cards.Children.Add(appsPage);
+        _populateAppsPage = () => appsPage.Children.Add(BuildCard(installed, layout, viewport.Width));
+        if (ItemsScroll.VerticalOffset > 0) EnsureAppsPage();
+
+        void ArrangeOverview(LauncherGroupBoard arrangement)
+        {
+            surface.Height = arrangement.Height;
+            for (var index = 0; index < arrangement.Cards.Count; index++)
+            {
+                var card = (FrameworkElement)surface.Children[index];
+                var bounds = arrangement.Cards[index].Bounds;
+                card.Width = bounds.Width;
+                card.Height = bounds.Height;
+                Canvas.SetLeft(card, bounds.Left);
+                Canvas.SetTop(card, bounds.Top);
+            }
+
+            overview.Width = Math.Max(natural.Width, arrangement.Width);
+            overview.Height = arrangement.Height + ungroupedHeight;
+            var scale = Math.Min(1.0, Math.Min(viewport.Width / overview.Width, viewport.Height / overview.Height));
+            viewbox.Width = overview.Width * scale;
+            viewbox.Height = overview.Height * scale;
+        }
     }
 
-    private Border BuildEmptyUngrouped(string name, int gap)
+    private Border BuildEmptyUngrouped(string name)
     {
         var text = new TextBlock { FontSize = 13, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         text.Inlines.Add(new System.Windows.Documents.Run(name) { FontWeight = FontWeights.SemiBold });
         text.Inlines.Add(new System.Windows.Documents.Run("   ·   将快捷方式拖到这里") { Foreground = DimBrush });
         var strip = new Border
         {
-            Child = text, Height = LauncherGridLayout.EmptyUngroupedHeight, Margin = new Thickness(0, gap, 0, 0),
+            Child = text, Height = LauncherGridLayout.EmptyUngroupedHeight,
             Padding = new Thickness(14, 0, 14, 0), Background = CardBrush,
             CornerRadius = new CornerRadius(10), BorderBrush = CardBorderBrush, BorderThickness = new Thickness(1),
         };
@@ -374,7 +436,7 @@ internal partial class LauncherWindow : Window
         return strip;
     }
 
-    private LaunchSection[] OverviewGroups() => _sections.Where(section => !IsAllApps(section)).ToArray();
+    private LaunchSection? UngroupedSection() => _sections.FirstOrDefault(section => section.Group is null && section.Name == "未分组");
 
     private static bool IsAllApps(LaunchSection section) => section.Group is null && section.Name == "所有应用";
 
@@ -383,7 +445,9 @@ internal partial class LauncherWindow : Window
 
     private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (e.OriginalSource != ItemsScroll || !IsVisible) return;
+        if (e.OriginalSource != ItemsScroll) return;
+        if (e.VerticalOffset > 0) EnsureAppsPage();
+        if (!IsVisible) return;
         if (ItemsScroll.ScrollableHeight <= 0)
         {
             HideScrollbar(fade: false);
@@ -412,22 +476,36 @@ internal partial class LauncherWindow : Window
 
     private void OnOverviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (_groupGesture is not null)
+        {
+            e.Handled = true;
+            return;
+        }
         if (_groupsPage is null || _groupsPage.ActualHeight == 0) return;
         var boundary = _groupsPage.ActualHeight;
         var offset = ItemsScroll.VerticalOffset;
-        var lastGroupsOffset = Math.Max(0, boundary - ItemsScroll.ViewportHeight);
 
-        // Skip the unused space after the last row of groups when moving between pages.
-        if (e.Delta < 0 && offset >= lastGroupsOffset && offset < boundary)
+        if (e.Delta < 0 && offset < boundary)
+        {
+            EnsureAppsPage();
             ItemsScroll.ScrollToVerticalOffset(boundary);
-        else if (e.Delta > 0 && offset > lastGroupsOffset && offset <= boundary)
-            ItemsScroll.ScrollToVerticalOffset(lastGroupsOffset);
+        }
+        else if (e.Delta > 0 && offset > 0 && offset <= boundary)
+            ItemsScroll.ScrollToTop();
         else return;
         e.Handled = true;
     }
 
+    private void EnsureAppsPage()
+    {
+        var populate = _populateAppsPage;
+        _populateAppsPage = null;
+        populate?.Invoke();
+    }
+
     private FrameworkElement BuildCard(LaunchSection section, LauncherGridLayout layout, double width,
-        bool ungrouped = false, string emptyMessage = "暂无项目")
+        bool ungrouped = false, string emptyMessage = "暂无项目",
+        (Canvas Surface, LauncherGroupBoard Board, Action<LauncherGroupBoard> Arrange)? groupBoard = null)
     {
         var content = new StackPanel { Margin = new Thickness(LauncherGridLayout.CardPadding - 1) };
         var card = new Border
@@ -442,9 +520,9 @@ internal partial class LauncherWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = section.Name,
         };
         var group = section.Group is { IsVirtual: true } ? section.Group : null;
-        if (group is not null) card.ContextMenu = GroupMenu(group);
+        if (group is not null && groupBoard is { } placement) card.ContextMenu = GroupMenu(section, placement.Board);
         if (group is not null || ungrouped) WireDrop(card, group);
-        var body = new ContentControl();
+        var body = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
         if (IsAllApps(section))
         {
             var filter = new CheckBox
@@ -465,6 +543,8 @@ internal partial class LauncherWindow : Window
                 SaveChange();
             };
         }
+        else if (group is not null && groupBoard is { } board)
+            AddGroupGestures(card, content, heading, body, section, layout, board.Surface, board.Board, board.Arrange);
         else content.Children.Add(heading);
         content.Children.Add(body);
         RenderItems();
@@ -499,11 +579,12 @@ internal partial class LauncherWindow : Window
 
         UniformGrid BuildTiles(IReadOnlyList<LaunchEntry> items)
         {
-            var columns = Math.Min(items.Count, layout.TileColumns(width));
+            var columns = section.Group is not null ? LauncherGridLayout.GroupColumns(section) :
+                Math.Min(items.Count, layout.TileColumns(width));
             var tiles = new UniformGrid
             {
                 Columns = columns, Width = columns * layout.TileWidth,
-                HorizontalAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
             };
             foreach (var entry in items)
             {
@@ -587,12 +668,7 @@ internal partial class LauncherWindow : Window
             }
             PopulateEntryMenu(contextMenu, item);
         };
-        contextMenu.Opened += (_, _) => _openEntryMenu = contextMenu;
-        contextMenu.Closed += (_, _) =>
-        {
-            if (_openEntryMenu == contextMenu) _openEntryMenu = null;
-            QueueSectionRefresh();
-        };
+        TrackContextMenu(contextMenu);
         return tile;
 
         void AnimateIcon(double targetScale)
@@ -761,9 +837,27 @@ internal partial class LauncherWindow : Window
     private void ShowEntryWarning(string message) =>
         MessageBox.Show(this, message, "简桌", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-    private ContextMenu GroupMenu(BoxConfig group)
+    private ContextMenu GroupMenu(LaunchSection section, LauncherGroupBoard board)
     {
+        var group = section.Group!;
         var menu = new ContextMenu();
+        var position = new MenuItem { Header = "移动分组" };
+        AddMove("向左", -1, 0);
+        AddMove("向右", 1, 0);
+        AddMove("向上", 0, -1);
+        AddMove("向下", 0, 1);
+        menu.Items.Add(position);
+        var count = section.Items.Count;
+        if (count > 1)
+        {
+            var columns = LauncherGridLayout.GroupColumns(section);
+            var options = Enumerable.Range(1, LauncherGridLayout.MaxGroupColumns(count));
+            int Rows(int value) => LauncherGridLayout.RowsFor(count, value);
+            menu.Items.Add(DimensionMenu("图标列数", columns, options, static value => value));
+            menu.Items.Add(DimensionMenu("图标行数", Rows(columns), options.OrderBy(value => Math.Abs(value - columns))
+                .DistinctBy(Rows).OrderBy(Rows), Rows));
+        }
+        menu.Items.Add(new Separator());
         AddMenu(menu, "重命名分组", () =>
         {
             Interact(() =>
@@ -783,7 +877,50 @@ internal partial class LauncherWindow : Window
             _config.Boxes.Remove(group);
             SaveChange();
         }));
+        TrackContextMenu(menu);
         return menu;
+
+        void AddMove(string label, int dx, int dy)
+        {
+            var slot = board.Neighbor(group.LauncherSlot.GetValueOrDefault(), dx, dy);
+            var item = new MenuItem { Header = label, IsEnabled = slot.HasValue };
+            item.Click += (_, _) =>
+            {
+                if (slot is int target) ChangeGroupLayout(() => LauncherGroupBoard.MoveTo(_config.Boxes, group, target));
+            };
+            position.Items.Add(item);
+        }
+
+        MenuItem DimensionMenu(string label, int selected, IEnumerable<int> choices, Func<int, int> dimension)
+        {
+            var parent = new MenuItem { Header = $"{label}（{selected}）" };
+            foreach (var columns in choices)
+            {
+                var value = dimension(columns);
+                var choice = new MenuItem { Header = value.ToString(), IsCheckable = true, IsChecked = value == selected };
+                choice.Click += (_, _) => ChangeGroupLayout(() => group.LauncherColumns = columns);
+                parent.Items.Add(choice);
+            }
+            return parent;
+        }
+    }
+
+    private void ChangeGroupLayout(Action change)
+    {
+        change();
+        _sectionVisualsDirty = true;
+        QueueSectionRefresh();
+        SaveChange();
+    }
+
+    private void TrackContextMenu(ContextMenu menu)
+    {
+        menu.Opened += (_, _) => _openContextMenu = menu;
+        menu.Closed += (_, _) =>
+        {
+            if (_openContextMenu == menu) _openContextMenu = null;
+            QueueSectionRefresh();
+        };
     }
 
     private void WireDrop(UIElement target, BoxConfig? group)
@@ -831,13 +968,19 @@ internal partial class LauncherWindow : Window
         if (string.IsNullOrEmpty(name)) return;
         var box = new BoxConfig { Title = name, IsVirtual = true };
         _config.Boxes.Add(box);
-        _groupToReveal = box;
         Search.Clear();
+        ItemsScroll.ScrollToTop();
         SaveChange();
     });
 
     private void OnKeyDown(object sender, KeyEventArgs e)
     {
+        if (_groupGesture is { } gesture)
+        {
+            if (e.Key == Key.Escape) gesture.CancelDrag();
+            e.Handled = true;
+            return;
+        }
         if (_nameEditor is not null)
         {
             if (e.Key is Key.Enter or Key.Escape)
@@ -848,6 +991,9 @@ internal partial class LauncherWindow : Window
             }
             return;
         }
+        if (_searchComposition is not null && Search.IsKeyboardFocusWithin && e.Key is Key.Enter or Key.Escape)
+            return;
+
         if (e.Key == Key.Escape)
         {
             if (Search.Text.Length != 0) Search.Clear();
@@ -859,6 +1005,13 @@ internal partial class LauncherWindow : Window
         {
             Search.Focus();
             Search.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.PageDown && _groupsPage is { ActualHeight: > 0 } page &&
+                 ItemsScroll.VerticalOffset < page.ActualHeight)
+        {
+            EnsureAppsPage();
+            ItemsScroll.ScrollToVerticalOffset(page.ActualHeight);
             e.Handled = true;
         }
         else if (e.Key == Key.F2 && Keyboard.Modifiers == ModifierKeys.None &&

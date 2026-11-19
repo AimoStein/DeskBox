@@ -25,6 +25,24 @@ internal static class LauncherSelfTest
         check("开始面板-支持右 Win 单键且预按 Shift 不触发",
             !Press(rightWin, modified: true) && !Release(rightWin) && !Press(rightWin) && Release(rightWin), "");
 
+        var blender = LaunchEntry.FromPath(Path.Combine(sandbox, "Blender 5.3.lnk"));
+        var spacedName = LaunchEntry.FromPath(Path.Combine(sandbox, "b-l"));
+        var photoshop = LaunchEntry.FromPath(Path.Combine(sandbox, "Photoshop.lnk"));
+        var editor = LaunchEntry.FromPath(Path.Combine(sandbox, "Visual Studio Code.lnk"));
+        var cpp = LaunchEntry.FromPath(Path.Combine(sandbox, "C++.lnk"));
+        var searchConfig = new AppConfig();
+        searchConfig.RecordLauncherOpen(blender.Path);
+        var searchable = new[] { blender, spacedName, photoshop, editor, cpp, blender };
+        LaunchEntry[] Search(string query) => LauncherCatalog.Search(searchable, query, searchConfig);
+        check("开始面板-输入法分隔符和全角字母仍匹配应用，完整名称优先",
+            new[] { "b'l", "b’l", "bʼl", "ｂ＇ｌ", "b l", "bl" }.All(query =>
+                Search(query).SequenceEqual(new[] { spacedName, blender })) &&
+            Search("p'h").SequenceEqual(new[] { photoshop }), "");
+        check("开始面板-支持多词名称首字母、普通子串和带标点的名称",
+            Search("v's'c").SequenceEqual(new[] { editor }) &&
+            Search("ender").SequenceEqual(new[] { blender }) &&
+            Search("C++").SequenceEqual(new[] { cpp }) && Search("'").Length == 0, "");
+
         var personal = LaunchEntry.FromPath(Path.Combine(sandbox, "desktop", "编辑器.lnk"));
         var shared = LaunchEntry.FromPath(Path.Combine(sandbox, "public", "编辑器.lnk"));
         var app = LaunchEntry.FromPath(@"shell:AppsFolder\Example.App!App", "示例应用");
@@ -155,27 +173,92 @@ internal static class LauncherSelfTest
             !config.LauncherUngroupedEntries.Any(entry => moveItems.Any(item => item.Path == entry.Path)), "");
 
         var counts = new[] { 14, 8, 10, 14, 6, 12, 31 };
-        var groups = counts.Select(count => new LaunchSection(group, group.Title, Enumerable.Repeat(alpha, count).ToArray())).ToArray();
-        var viewport = new Size(1760, 1260);
-        var layout = LauncherGridLayout.Fit(viewport, groups, 49, 18);
-        check("开始面板-首屏优先完整展示分组和未分组快捷方式",
-            layout.GroupColumns > 1 && layout.IconSize == 49 && layout.TotalHeight(viewport.Width, groups) <= viewport.Height, "");
-        var fitted = LauncherGridLayout.MeasureViewport(viewport, groups, 49, 18);
-        var fittedLayout = LauncherGridLayout.Fit(fitted, groups, 49, 18);
-        check("开始面板-按分组实际面积确定窗口尺寸",
-            fitted.Width < viewport.Width && fitted.Height < viewport.Height && fittedLayout.IconSize == 49 &&
-            fittedLayout.TotalHeight(fitted.Width, groups) == fitted.Height, $"{fitted.Width} × {fitted.Height}");
-        var fittedColumns = fittedLayout.TileColumns(fittedLayout.CardWidth(fitted.Width, fittedLayout.GroupColumns));
-        check("开始面板-有足够空间时每组横向图标多于竖向",
-            counts.All(count => Math.Min(count, fittedColumns) > Math.Ceiling(count / (double)fittedColumns)), "");
+        var boardGroups = counts.Select((_, index) => new BoxConfig { IsVirtual = true, Title = $"分组 {index + 1}" }).ToArray();
+        int?[] oldSlots = [0, 2, 3, 4, 5, 8, null];
+        for (var index = 0; index < boardGroups.Length; index++) boardGroups[index].LauncherSlot = oldSlots[index];
+        check("开始面板-升级布局保留分组阅读顺序",
+            LauncherGroupBoard.AssignSlots(Enumerable.Reverse(boardGroups)) &&
+            boardGroups.Select(box => box.LauncherSlot).SequenceEqual(Enumerable.Range(0, boardGroups.Length).Select(slot => (int?)slot)) &&
+            !LauncherGroupBoard.AssignSlots(boardGroups), "");
+        var groups = boardGroups.Select((box, index) => new LaunchSection(box, box.Title,
+            Enumerable.Repeat(alpha, counts[index]).ToArray())).ToArray();
+        var layout = new LauncherGridLayout(49, 18);
+        var board = new LauncherGroupBoard(groups, layout);
+        var firstBounds = board.Cards[0].Bounds;
+        var nearSecond = board.Snap(new Point(firstBounds.Right + layout.Gap * 0.75, 8), 0);
+        var lowerRow = board.Cards[4].Bounds;
+        var acrossRows = board.Snap(new Point(lowerRow.Left + 8, lowerRow.Top + 8), 0);
+        check("开始面板-两行分别顶对齐且等间距，支持跨行移动",
+            board.Cards.Count == boardGroups.Length && HasEqualGaps(board) &&
+            lowerRow.Top == board.Cards.Take(4).Max(card => card.Bounds.Bottom) + layout.Gap &&
+            nearSecond?.Slot == boardGroups[1].LauncherSlot && nearSecond?.Bounds.Left == firstBounds.Right + layout.Gap &&
+            acrossRows?.Slot == 4 && board.Neighbor(0, 0, 1) == 4 && board.Neighbor(3, 1, 0) is null &&
+            board.Snap(new Point(board.Width + layout.Gap, 8), 0) is null &&
+            board.Snap(new Point(8, board.Height + layout.Gap), 0) is null, "");
+        var dx = layout.TileWidth;
+        var dy = layout.TileHeight;
+        var dragOffsets = new[] { new Vector(-2 * dx, 0), new Vector(0, -dy), new Vector(-5000, 5000),
+            new Vector(5000, -5000), new Vector(-5000, -5000), new Vector(5000, 5000) };
+        check("开始面板-横向和纵向拖动按合法格位吸附，全部图标可见且没有整行整列空位",
+            layout.ResizeGroup(groups[0], dragOffsets[0]) == 4 &&
+            layout.ResizeGroup(groups[0], dragOffsets[1]) == 7 &&
+            groups.All(group => dragOffsets.All(offset =>
+            {
+                var columns = layout.ResizeGroup(group, offset);
+                var rows = LauncherGridLayout.RowsFor(group.Items.Count, columns);
+                return columns <= group.Items.Count && columns * rows >= group.Items.Count &&
+                    columns * (rows - 1) < group.Items.Count;
+            })), "");
+        var grownGroups = groups.ToArray();
+        grownGroups[0] = grownGroups[0] with { Items = Enumerable.Repeat(alpha, 50).ToArray() };
+        grownGroups[1] = grownGroups[1] with { Items = Array.Empty<LaunchEntry>() };
+        var grown = new LauncherGroupBoard(grownGroups, layout);
+        var fitted = layout.MeasureWindow(new Size(3200, 2000), new LauncherGroupBoard(groups.Take(2), layout), ungrouped: null);
+        var grownSize = layout.MeasureWindow(new Size(3200, 2000), new LauncherGroupBoard(grownGroups.Take(2), layout), ungrouped: null);
+        check("开始面板-拖入和移出图标后自动收紧卡片并保持顺序",
+            !LauncherGroupBoard.AssignSlots(boardGroups) &&
+            board.Cards.Select(card => card.Section.Group).SequenceEqual(grown.Cards.Select(card => card.Section.Group)) &&
+            HasEqualGaps(grown) && grown.Cards[1].Bounds.Width < board.Cards[1].Bounds.Width &&
+            grown.Height > board.Height && grown.Width < board.Width, "");
 
-        var narrowViewport = new Size(420, 320);
-        var narrow = LauncherGridLayout.Fit(narrowViewport, groups, 49, 18);
-        check("开始面板-窄窗口自动压缩并保留全部可滚动内容",
-            narrow.IconSize == 32 && narrow.TotalHeight(narrowViewport.Width, groups) > narrowViewport.Height &&
-            narrow.TileColumns(narrow.CardWidth(narrowViewport.Width, narrow.GroupColumns)) > 0, "");
-        check("开始面板-尺寸受限时使用可用空间并允许滚动",
-            LauncherGridLayout.MeasureViewport(narrowViewport, groups, 49, 18) == narrowViewport, "");
+        boardGroups[0].LauncherColumns = 4;
+        boardGroups[0].LauncherRows = 12;
+        var fixedSize = layout.GroupSize(groups[0]);
+        var resized = board.ResizeCard(0, fixedSize);
+        check("开始面板-旧配置的多余行列自动收紧，图标变多时按需扩展",
+            fixedSize.Height == 2 * LauncherGridLayout.CardPadding + LauncherGridLayout.HeadingHeight + 4 * dy &&
+            LauncherGridLayout.GroupColumns(groups[0] with { Items = new[] { alpha } }) == 1 &&
+            layout.GroupSize(grownGroups[0]).Height > fixedSize.Height && fixedSize.Width < firstBounds.Width, "");
+        check("开始面板-调整一组行列后其他组保持左右顺序、尺寸和间距",
+            HasEqualGaps(resized) && resized.Cards[0].Bounds.Size == fixedSize &&
+            resized.Cards.Skip(1).Zip(board.Cards.Skip(1)).All(pair =>
+                pair.First.Section == pair.Second.Section && pair.First.Bounds.Size == pair.Second.Bounds.Size &&
+                Math.Abs((pair.First.Bounds.Left - pair.Second.Bounds.Left) -
+                    (pair.Second.Bounds.Top == 0 ? fixedSize.Width - firstBounds.Width : 0)) < 0.01), "");
+
+        var initialSlots = boardGroups.Select(box => box.LauncherSlot).ToArray();
+        LauncherGroupBoard.MoveTo(boardGroups, boardGroups[0], 1);
+        var restoredBoardGroups = System.Text.Json.JsonSerializer.Deserialize<BoxConfig[]>(System.Text.Json.JsonSerializer.Serialize(boardGroups))!;
+        check("开始面板-手动移动可交换格位，保存重启后保留位置和图标行列",
+            !LauncherGroupBoard.AssignSlots(restoredBoardGroups) &&
+            restoredBoardGroups[0].LauncherSlot == initialSlots[1] && restoredBoardGroups[1].LauncherSlot == initialSlots[0] &&
+            restoredBoardGroups[0].LauncherColumns == 4 &&
+            restoredBoardGroups.Skip(2).Select(box => box.LauncherSlot).SequenceEqual(initialSlots.Skip(2)), "");
+
+        var viewport = new Size(1760, 1260);
+        var windowSpace = new Size(3200, 2000);
+        var emptySize = layout.MeasureWindow(windowSpace, new LauncherGroupBoard(Array.Empty<LaunchSection>(), layout), ungrouped: null);
+        check("开始面板-窗口按内容独立调整宽高",
+            fitted.Width < windowSpace.Width && fitted.Height < windowSpace.Height &&
+            emptySize.Height < fitted.Height && fitted.Height < grownSize.Height &&
+            fitted.Width == grownSize.Width && fitted.Width == emptySize.Width, $"{fitted.Width} × {fitted.Height}");
+        var portraitSpace = new Size(420, 780);
+        var portraitWindow = layout.MeasureWindow(portraitSpace, board, ungrouped: null);
+        var shortSpace = new Size(1600, 420);
+        var shortWindow = layout.MeasureWindow(shortSpace, board, ungrouped: null);
+        check("开始面板-纵向屏幕或并排设置时窗口留在可用区内",
+            portraitWindow.Width == portraitSpace.Width && portraitWindow.Height <= portraitSpace.Height &&
+            shortWindow.Width <= shortSpace.Width && shortWindow.Height == shortSpace.Height, "");
 
         var screen = new System.Drawing.Rectangle(-1920, 0, 1920, 1080);
         check("开始面板-按任务栏所在边定位并保留 DPI 缩放间距",
@@ -184,16 +267,14 @@ internal static class LauncherSelfTest
             LauncherWindow.NearTaskbar(screen, new(-1872, 0, 1872, 1080), 800, 600, 1) == new System.Drawing.Point(-1864, 240) &&
             LauncherWindow.NearTaskbar(screen, new(-1920, 0, 1872, 1080), 800, 600, 1) == new System.Drawing.Point(-856, 240), "");
 
-        var empty = new LaunchSection(group, group.Title, Array.Empty<LaunchEntry>());
-        var withEmpty = new[] { empty, empty };
-        var roomy = LauncherGridLayout.Fit(viewport, withEmpty, 64, 21);
-        check("开始面板-空分组保留空间，内容较少时沿用设置中的图标尺寸和间距",
-            roomy.IconSize == 64 && roomy.GroupColumns == 2 && roomy.Gap == 21 &&
-            roomy.TotalHeight(viewport.Width, withEmpty) > LauncherGridLayout.HeadingHeight, "");
-        var emptySize = LauncherGridLayout.MeasureViewport(viewport, withEmpty, 49, 18);
-        check("开始面板-内容变少时窗口自动缩小",
-            emptySize.Width * emptySize.Height < fitted.Width * fitted.Height, "");
+        bool HasEqualGaps(LauncherGroupBoard value)
+        {
+            var rows = value.Cards.GroupBy(card => card.Bounds.Top).ToArray();
+            return rows.Length == 2 && rows.All(row => row.First().Bounds.Left == 0 &&
+                row.Zip(row.Skip(1)).All(pair => Math.Abs(pair.Second.Bounds.Left - pair.First.Bounds.Right - layout.Gap) < 0.01));
+        }
 
+        LauncherGroupBoard.AssignSlots(config.Boxes);
         var window = new LauncherWindow(config);
         try
         {
@@ -201,8 +282,8 @@ internal static class LauncherSelfTest
             var root = (FrameworkElement)window.Content;
             var scroll = (ScrollViewer)window.FindName("ItemsScroll");
             var cards = (StackPanel)window.FindName("Cards");
-            var compact = LauncherGridLayout.MeasureViewport(viewport, sections.Take(2).ToArray(), config.LauncherIconSize, config.LauncherLayerGap);
-            var panel = new Size(compact.Width + LauncherWindow.PanelHorizontalSpace, compact.Height + LauncherWindow.PanelVerticalSpace);
+            var panelLayout = new LauncherGridLayout(config.LauncherIconSize, config.LauncherLayerGap);
+            var panel = panelLayout.MeasureWindow(viewport, new LauncherGroupBoard(allAppSections, panelLayout), allAppSections[1]);
             root.Measure(panel);
             root.Arrange(new Rect(panel));
             FlushLayout();
@@ -210,8 +291,10 @@ internal static class LauncherSelfTest
             var appsPage = (FrameworkElement)cards.Children[1];
             var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
             double AppsTop() => appsPage.TranslatePoint(new Point(), content).Y;
-            check("开始面板-所有应用位于首屏可视范围之外",
-                scroll.ViewportHeight > 0 && AppsTop() >= scroll.ViewportHeight - 0.5, "");
+            var overviewFrame = (Viewbox)((StackPanel)cards.Children[0]).Children[0];
+            check("开始面板-首屏贴合实际高度，所有应用在滚动时才创建",
+                scroll.ViewportHeight > 0 && Math.Abs(scroll.ViewportHeight - overviewFrame.ActualHeight) < 1 &&
+                AppsTop() >= scroll.ViewportHeight - 0.5 && ((StackPanel)appsPage).Children.Count == 0, "");
 
             Wheel(-120);
             check("开始面板-向下滚动到所有应用",
@@ -254,6 +337,38 @@ internal static class LauncherSelfTest
             Wheel(120);
             check("开始面板-向上滚动返回分组首屏",
                 scroll.VerticalOffset == 0 && AppsTop() >= scroll.ViewportHeight - 0.5, "");
+
+            var denseUngrouped = new LaunchSection(null, "未分组", Enumerable.Repeat(alpha, 26).ToArray());
+            window.SetSections(groups.Concat(new[] { denseUngrouped, allAppSections[^1] }).ToArray());
+            var narrow = new Size(800, 450);
+            root.Measure(narrow);
+            root.Arrange(new Rect(narrow));
+            FlushLayout();
+            var groupPage = (StackPanel)cards.Children[0];
+            var viewbox = (Viewbox)groupPage.Children[0];
+            var surface = (Canvas)((StackPanel)viewbox.Child).Children[0];
+            var tiles = Descendants(groupPage).OfType<Button>().Where(button => button.Tag is LaunchEntry).ToArray();
+            var firstScreen = new Rect(content.RenderSize);
+            firstScreen.Inflate(0.5, 0.5);
+            var tileBounds = tiles.Select(tile => tile.TransformToAncestor(content).TransformBounds(new Rect(tile.RenderSize))).ToArray();
+            var topPositions = surface.Children.OfType<Border>()
+                .GroupBy(card => card.TranslatePoint(new Point(), content).Y).Select(row => row.Count()).ToArray();
+            check("开始面板-空间受限也严格分两行顶对齐，组内和未分组图标全部在首屏",
+                topPositions.SequenceEqual(new[] { 4, 3 }) &&
+                tiles.Length == counts.Sum() + denseUngrouped.Items.Count && tileBounds.All(firstScreen.Contains) &&
+                !Descendants(groupPage).OfType<ScrollViewer>().Any() && scroll.HorizontalOffset == 0 &&
+                scroll.VerticalOffset == 0 && ((FrameworkElement)cards.Children[1]).TranslatePoint(new Point(), content).Y
+                    >= scroll.ViewportHeight - 0.5, $"{tiles.Length} 项 / {content.RenderSize}");
+
+            static IEnumerable<DependencyObject> Descendants(DependencyObject visual)
+            {
+                for (var index = 0; index < System.Windows.Media.VisualTreeHelper.GetChildrenCount(visual); index++)
+                {
+                    var child = System.Windows.Media.VisualTreeHelper.GetChild(visual, index);
+                    yield return child;
+                    foreach (var descendant in Descendants(child)) yield return descendant;
+                }
+            }
 
             void Wheel(int delta)
             {
