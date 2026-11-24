@@ -38,6 +38,8 @@ public static class ShellItemInterop
 
     public const string NetworkParsingName = "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}";
 
+    internal static readonly Guid DownloadsFolderId = new("374DE290-123F-4565-9164-39C4925E467B");
+
     // ---------------------------------------------------------------- P/Invoke
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
@@ -71,6 +73,16 @@ public static class ShellItemInterop
 
     [DllImport("shell32.dll")]
     private static extern int SHGetDesktopFolder(out IShellFolder ppshf);
+
+    [DllImport("shell32.dll")]
+    private static extern int SHGetKnownFolderPath(in Guid folderId, uint flags, IntPtr token, out IntPtr path);
+
+    internal static string? GetKnownFolderPath(Guid folderId)
+    {
+        var result = SHGetKnownFolderPath(in folderId, 0, IntPtr.Zero, out var path);
+        try { return result == S_OK ? Marshal.PtrToStringUni(path) : null; }
+        finally { Marshal.FreeCoTaskMem(path); }
+    }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern int SHCreateItemFromParsingName(

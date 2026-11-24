@@ -53,7 +53,12 @@ public partial class App
         _config = Models.ConfigStore.Load();
         ThemeManager.Apply(_config.Theme);
         _launcher = new LauncherWindow(_config, preview: true);
-        _launcher.ConfigChanged += RefreshLauncher;
+        _launcher.ConfigChanged += () =>
+        {
+            _launcherCatalogRevision++;
+            RefreshLauncher();
+            RequestLauncherScan();
+        };
         _launcher.UsageChanged += RefreshLauncher;
         _launcher.ShortcutDeleted += RemoveLauncherShortcut;
         _launcher.Closed += (_, _) => Shutdown();
@@ -163,9 +168,11 @@ public partial class App
 
     private void LauncherConfigChanged()
     {
+        _launcherCatalogRevision++;
         RefreshLauncher();
         RefreshLauncherWatchers();
         RefreshLauncherInput();
+        RequestLauncherScan();
         ScheduleSave();
     }
 
@@ -200,8 +207,14 @@ public partial class App
         var revision = _launcherCatalogRevision;
         try
         {
-            var catalog = await LauncherCatalog.ScanAsync(_shell, _config.EffectiveBoxRoot, _config.ShowHiddenFiles);
+            var references = VirtualGroups.References(_config).Select(entry => entry.Path).ToArray();
+            var legacyFolders = _config.Boxes.Where(box => !box.IsVirtual)
+                .Select(box => LauncherCatalog.LegacyBoxFolder(box, _config)).ToArray();
+            var catalog = await LauncherCatalog.ScanAsync(_shell, _config.EffectiveBoxRoot, _config.ShowHiddenFiles,
+                references, legacyFolders);
             if (_exiting || revision != _launcherCatalogRevision) return;
+            if (_ownsConfig && catalog.PruneMissingReferences(_config, _launcherCatalog))
+                ScheduleSave();
             _launcherCatalog = catalog;
             RefreshLauncherWatchers();
             RefreshLauncher();
@@ -262,6 +275,7 @@ public partial class App
     private void LauncherFilesChanged(object sender, FileSystemEventArgs args) => Dispatcher.BeginInvoke(() =>
     {
         if (_exiting) return;
+        _launcherCatalogRevision++;
         if (args is RenamedEventArgs rename && VirtualGroups.RenameReference(_config, rename.OldFullPath, rename.FullPath))
             LauncherConfigChanged();
         IconCache.Invalidate(args.FullPath);

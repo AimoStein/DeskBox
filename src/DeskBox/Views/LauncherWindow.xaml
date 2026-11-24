@@ -106,7 +106,24 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <Style x:Key="PanelButton" TargetType="Button">
+        <Geometry x:Key="SearchIcon">M 10,3.5 A 6.5,6.5 0 1 0 10,16.5 A 6.5,6.5 0 1 0 10,3.5 M 15,15 L 20.5,20.5</Geometry>
+        <Geometry x:Key="AddGroupIcon">M 4,20.5 L 4,3.5 L 21,3.5 L 21,20.5 Z M 8,12 L 17,12 M 12.5,7.5 L 12.5,16.5</Geometry>
+        <Geometry x:Key="TaskManagerIcon">M 3.5,4.5 H 21 V 19.5 H 3.5 Z M 6.5,15 L 10,11 L 13,13.5 L 17.5,8.5</Geometry>
+        <Geometry x:Key="RegistryEditorIcon">M 3.5,10 H 9 V 15.5 H 3.5 Z M 3.5,15.5 H 9 V 21 H 3.5 Z M 9,15.5 H 14.5 V 21 H 9 Z M 10.5,8.5 H 16 V 14 H 10.5 Z M 16.5,3 H 22 V 8.5 H 16.5 Z</Geometry>
+        <Geometry x:Key="ExplorerIcon">M 3,19.5 V 5.5 H 9.5 L 12,8 H 21 V 19.5 Z M 3,11 H 21</Geometry>
+        <Geometry x:Key="DocumentsIcon">M 6,21 V 3 H 14 L 19,8 V 21 Z M 14,3 V 8 H 19 M 9,12 H 16 M 9,16 H 16</Geometry>
+        <Geometry x:Key="DownloadsIcon">M 12,3.5 V 15 M 7.5,10.5 L 12,15 L 16.5,10.5 M 4.5,18 V 20.5 H 19.5 V 18</Geometry>
+        <Geometry x:Key="DeskBoxSettingsIcon">M 3.5,6 H 9 M 13,6 H 20.5 M 9,3.5 V 8.5 M 3.5,12 H 15 M 19,12 H 20.5 M 15,9.5 V 14.5 M 3.5,18 H 7 M 11,18 H 20.5 M 7,15.5 V 20.5</Geometry>
+        <Geometry x:Key="WindowsSettingsIcon">M 9.5,3.5 H 14.5 L 15,6.2 L 17,7.4 L 19.6,6.5 L 22,10.7 L 19.9,12.5 V 14.8 L 22,16.4 L 19.6,20.5 L 17,19.7 L 15,20.8 L 14.5,23 H 9.5 L 9,20.8 L 7,19.7 L 4.4,20.5 L 2,16.4 L 4.1,14.8 V 12.5 L 2,10.7 L 4.4,6.5 L 7,7.4 L 9,6.2 Z M 12,10 A 3.5,3.5 0 1 0 12,17 A 3.5,3.5 0 1 0 12,10</Geometry>
+        <Geometry x:Key="InstalledAppsIcon">M 4,4 H 10 V 10 H 4 Z M 14,4 H 20 V 10 H 14 Z M 4,14 H 10 V 20 H 4 Z M 14,14 H 20 V 20 H 14 Z</Geometry>
+        <Geometry x:Key="SleepIcon">M 13,3 C 7.5,3 3.5,7.4 3.5,12.5 C 3.5,17.6 7.6,21.5 12.5,21.5 C 16.7,21.5 20.2,18.8 21.5,15 C 16,16.8 10.5,12.7 10.5,7.4 C 10.5,5.7 11.3,4.1 13,3 Z</Geometry>
+        <Geometry x:Key="RestartIcon">M 4.2,10 A 8,8 0 1 1 4.8,16 M 4.2,5.5 V 10 H 8.7</Geometry>
+        <Geometry x:Key="ShutDownIcon">M 12,3 V 11 M 7,6.8 A 8,8 0 1 0 17,6.8</Geometry>
+        <DataTemplate x:Key="ToolbarIcon">
+            <Image Source="{Binding}" Width="20" Height="20" Stretch="Uniform"
+                   RenderOptions.BitmapScalingMode="HighQuality" />
+        </DataTemplate>
+        <Style x:Key="ToolbarButton" TargetType="Button">
             <Style.Resources>
                 <SolidColorBrush x:Key="PanelButtonHoverBrush" Color="#20CCDDF2" />
             </Style.Resources>
@@ -114,8 +131,13 @@
             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
-            <Setter Property="Padding" Value="12,7" />
-            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Width" Value="36" />
+            <Setter Property="Height" Value="36" />
+            <Setter Property="Margin" Value="2,0" />
+            <Setter Property="ToolTipService.InitialShowDelay" Value="350" />
+            <Setter Property="ToolTipService.ShowsToolTipOnKeyboardFocus" Value="False" />
+            <Setter Property="AutomationProperties.Name" Value="{Binding ToolTip, RelativeSource={RelativeSource Self}}" />
+            <Setter Property="ContentTemplate" Value="{StaticResource ToolbarIcon}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -172,36 +194,10 @@
         <Border BorderBrush="#48B4C1D2" BorderThickness="1" CornerRadius="24" IsHitTestVisible="False" />
         <Grid Margin="24,20,8,20">
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
-            <DockPanel Margin="0,0,16,14">
-                <Button x:Name="SettingsButton" DockPanel.Dock="Right" Content="设置"
-                        Margin="8,0,0,0" Background="#12DAE6F9" BorderBrush="#1FDAE6F9"
-                        Style="{StaticResource PanelButton}" />
-                <Button x:Name="AddGroup" DockPanel.Dock="Right" Content="＋ 新建分组"
-                        Margin="8,0,0,0" Background="#12DAE6F9" BorderBrush="#1FDAE6F9"
-                        AutomationProperties.Name="新建分组" Style="{StaticResource PanelButton}" />
-                <Border Background="#34000000" BorderBrush="#2ADAE6F9" BorderThickness="1" CornerRadius="10" Height="44">
-                    <Grid Margin="12,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <Path Data="M 13,8 A 5,5 0 1 1 3,8 A 5,5 0 1 1 13,8 M 12,12 L 17,17"
-                              Stroke="#C7D4DE" StrokeThickness="1.5" VerticalAlignment="Center" Margin="0,0,10,0"
-                              StrokeEndLineCap="Round" StrokeStartLineCap="Round"
-                              IsHitTestVisible="False" />
-                        <TextBlock x:Name="SearchHint" Grid.Column="1" Text="搜索应用、快捷方式或文件"
-                                   TextTrimming="CharacterEllipsis" Foreground="#AFBBC9" FontSize="14"
-                                   VerticalAlignment="Center" IsHitTestVisible="False" />
-                        <TextBox x:Name="Search" Grid.Column="1" Background="Transparent" BorderThickness="0" Padding="0"
-                                 CaretBrush="#ECF4FA" Foreground="#FFF1F4F7" FontSize="14" VerticalContentAlignment="Center"
-                                 AutomationProperties.Name="搜索应用、快捷方式或文件" />
-                    </Grid>
-                </Border>
-            </DockPanel>
-            <ScrollViewer x:Name="ItemsScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto"
+            <ScrollViewer x:Name="ItemsScroll" VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalOnly" Focusable="False"
                           AutomationProperties.Name="分组和快捷方式">
                 <ScrollViewer.Template>
@@ -223,7 +219,7 @@
                 </ScrollViewer.Template>
                 <StackPanel x:Name="Cards" HorizontalAlignment="Left" />
             </ScrollViewer>
-            <Canvas x:Name="GroupDragOverlay" Grid.Row="1" IsHitTestVisible="False" ClipToBounds="True">
+            <Canvas x:Name="GroupDragOverlay" IsHitTestVisible="False" ClipToBounds="True">
                 <Border x:Name="GroupDragOutline" Visibility="Collapsed" BorderBrush="#FFA5D5FF"
                         BorderThickness="2" CornerRadius="14" Background="#308CBFFF">
                     <Border Background="#ED26394A" CornerRadius="6" HorizontalAlignment="Left" VerticalAlignment="Top"
@@ -232,6 +228,40 @@
                     </Border>
                 </Border>
             </Canvas>
+            <Viewbox Grid.Row="1" Height="40" Margin="0,12,16,0" HorizontalAlignment="Center" StretchDirection="DownOnly">
+                <StackPanel x:Name="Toolbar" Orientation="Horizontal"
+                            KeyboardNavigation.TabNavigation="Continue">
+                    <StackPanel.Resources>
+                        <Style TargetType="Button" BasedOn="{StaticResource ToolbarButton}" />
+                    </StackPanel.Resources>
+                    <Button x:Name="SearchButton" Content="{StaticResource SearchIcon}" ToolTip="搜索" />
+                    <Border x:Name="SearchBox" Width="0" Height="34" Opacity="0" IsHitTestVisible="False"
+                            Background="#34000000" BorderBrush="#2ADAE6F9" BorderThickness="1" CornerRadius="8"
+                            VerticalAlignment="Center" ClipToBounds="True">
+                        <Grid Margin="10,0">
+                            <TextBlock x:Name="SearchHint" Text="搜索应用、快捷方式或文件"
+                                       TextTrimming="CharacterEllipsis" Foreground="#AFBBC9" FontSize="13"
+                                       VerticalAlignment="Center" IsHitTestVisible="False" />
+                            <TextBox x:Name="Search" IsTabStop="False" Background="Transparent" BorderThickness="0" Padding="0"
+                                     CaretBrush="#ECF4FA" Foreground="#FFF1F4F7" FontSize="13" VerticalContentAlignment="Center"
+                                     AutomationProperties.Name="搜索应用、快捷方式或文件" />
+                        </Grid>
+                    </Border>
+                    <Button x:Name="AddGroup" Content="{StaticResource AddGroupIcon}" ToolTip="新建分组" />
+                    <Button x:Name="SettingsButton" Content="{StaticResource DeskBoxSettingsIcon}" ToolTip="简桌设置" />
+                    <Button x:Name="TaskManagerButton" Content="{StaticResource TaskManagerIcon}" ToolTip="任务管理器"
+                            Margin="26,0,2,0" />
+                    <Button x:Name="RegistryEditorButton" Content="{StaticResource RegistryEditorIcon}" ToolTip="注册表编辑器" />
+                    <Button x:Name="ExplorerButton" Content="{StaticResource ExplorerIcon}" ToolTip="文件资源管理器" />
+                    <Button x:Name="DocumentsButton" Content="{StaticResource DocumentsIcon}" ToolTip="文档" />
+                    <Button x:Name="DownloadsButton" Content="{StaticResource DownloadsIcon}" ToolTip="下载" />
+                    <Button x:Name="WindowsSettingsButton" Content="{StaticResource WindowsSettingsIcon}" ToolTip="Windows 设置" />
+                    <Button x:Name="InstalledAppsButton" Content="{StaticResource InstalledAppsIcon}" ToolTip="已安装的应用" />
+                    <Button x:Name="SleepButton" Content="{StaticResource SleepIcon}" ToolTip="睡眠" />
+                    <Button x:Name="RestartButton" Content="{StaticResource RestartIcon}" ToolTip="重启" />
+                    <Button x:Name="ShutDownButton" Content="{StaticResource ShutDownIcon}" ToolTip="关机" />
+                </StackPanel>
+            </Viewbox>
         </Grid>
     </Grid>
 </Window>

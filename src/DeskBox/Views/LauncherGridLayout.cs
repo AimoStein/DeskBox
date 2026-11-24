@@ -11,7 +11,7 @@ internal readonly record struct LauncherGridLayout(int IconSize, int Gap)
     internal const int HoverInset = 4;
     internal const int EmptyUngroupedHeight = 44;
     private const double WindowHorizontalSpace = 48;
-    private const double WindowVerticalSpace = 98;
+    private const double WindowVerticalSpace = 92;
     private const int PreferredMinimumWidth = 640;
 
     internal double TileWidth => Math.Max(76, IconSize + 20);

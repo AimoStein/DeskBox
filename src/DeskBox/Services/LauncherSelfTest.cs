@@ -108,6 +108,50 @@ internal static class LauncherSelfTest
             LauncherCatalog.ExcludeGroupedApps(new[] { secondLink, featureLink, controlPanel }, new[] { duplicateGroup })
                 .SequenceEqual(new[] { featureLink }), "");
 
+        var missingShortcut = Path.Combine(shortcutFolder, "missing.lnk");
+        var malformedLink = Path.Combine(shortcutFolder, "malformed.lnk");
+        var malformedUrl = Path.Combine(shortcutFolder, "malformed.url");
+        var remoteUrl = Path.Combine(shortcutFolder, "network.url");
+        var directoryNamedLikeLink = Path.Combine(shortcutFolder, "folder.lnk");
+        var systemLink = ShortcutFactory.CreateInFolder(shortcutFolder, DeskBox.Interop.ShellItemInterop.RecycleBinParsingName, "回收站");
+        File.WriteAllText(malformedLink, "not a .lnk file");
+        File.WriteAllText(malformedUrl, "[InternetShortcut]\nURL=invalid address\n");
+        File.WriteAllText(remoteUrl, "[InternetShortcut]\nURL=file://example.test/share/file.txt\n");
+        Directory.CreateDirectory(directoryNamedLikeLink);
+        var unavailable = LauncherCatalog.FindUnavailableShortcuts(new[]
+        {
+            missingShortcut, malformedLink, firstLink.Path, malformedUrl, groupedUrl, remoteUrl,
+            directoryNamedLikeLink, systemLink, app.Path,
+        });
+        check("开始面板-识别缺失快捷方式、损坏链接及缺失的本地目标，保留网络和 Shell 入口",
+            unavailable.Count == 4 && unavailable.GetValueOrDefault(missingShortcut) == LauncherShortcutState.MissingFile &&
+            new[] { malformedLink, firstLink.Path, malformedUrl }.All(path =>
+                unavailable.GetValueOrDefault(path) == LauncherShortcutState.Invalid),
+            string.Join(" / ", unavailable.Select(item => $"{Path.GetFileName(item.Key)}={item.Value}")));
+
+        var cleanupConfig = new AppConfig();
+        var cleanupGroup = new BoxConfig { Title = "快捷方式", IsVirtual = true };
+        cleanupConfig.Boxes.Add(cleanupGroup);
+        VirtualGroups.Add(cleanupConfig, cleanupGroup, new[] { missingShortcut, malformedLink, systemLink }
+            .Select(path => new GroupEntry { Path = path }));
+        cleanupConfig.LauncherUngroupedEntries.Add(new GroupEntry { Path = malformedUrl });
+        cleanupConfig.RecordLauncherOpen(missingShortcut);
+        var scanned = new LauncherCatalog(new[] { firstLink, LaunchEntry.FromPath(remoteUrl) },
+            new[] { LaunchEntry.FromPath(malformedUrl), LaunchEntry.FromPath(groupedUrl) })
+            { UnavailableShortcuts = unavailable };
+        var cleaned = scanned.Sections(cleanupConfig);
+        check("开始面板-所有分区和搜索数据均排除失效项，源文件保留",
+            cleaned.Select(section => section.Items.Single().Path).SequenceEqual(new[] { systemLink, remoteUrl, groupedUrl }) &&
+            File.Exists(malformedLink) && File.Exists(malformedUrl), "");
+        check("开始面板-连续两次确认快捷方式文件不存在才清理保存引用",
+            !scanned.PruneMissingReferences(cleanupConfig, scanned with
+            {
+                UnavailableShortcuts = new Dictionary<string, LauncherShortcutState>(),
+            }) && scanned.PruneMissingReferences(cleanupConfig, scanned) &&
+            cleanupGroup.Entries.All(entry => entry.Path != missingShortcut) &&
+            !cleanupGroup.ItemOrder.Contains(missingShortcut) && !cleanupConfig.LauncherOpenCounts.ContainsKey(missingShortcut) &&
+            cleanupGroup.Entries.Any(entry => entry.Path == malformedLink), "");
+
         LaunchEntry WriteLink(string name, string args, string directory)
         {
             var path = ShortcutFactory.CreateInFolder(shortcutFolder, launchTarget, name);
@@ -292,6 +336,22 @@ internal static class LauncherSelfTest
             var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
             double AppsTop() => appsPage.TranslatePoint(new Point(), content).Y;
             var overviewFrame = (Viewbox)((StackPanel)cards.Children[0]).Children[0];
+            var toolbar = (StackPanel)window.FindName("Toolbar");
+            var toolbarButtons = toolbar.Children.OfType<Button>().ToArray();
+            var toolbarNames = new[] { "搜索", "新建分组", "简桌设置", "任务管理器", "注册表编辑器", "文件资源管理器", "文档", "下载",
+                "Windows 设置", "已安装的应用", "睡眠", "重启", "关机" };
+            var searchBox = (Border)window.FindName("SearchBox");
+            var scrollBottom = scroll.TranslatePoint(new Point(0, scroll.ActualHeight), root).Y;
+            check("开始面板-简桌和系统图标在底部同一行并留出组间距，悬停显示名称",
+                toolbarButtons.Select(button => button.ToolTip).SequenceEqual(toolbarNames) &&
+                toolbarButtons.All(button => button.Focusable && button.ActualWidth > 0 &&
+                    button.Content is System.Windows.Media.DrawingImage && HasRenderedImage(button) &&
+                    Equals(button.ToolTip, System.Windows.Automation.AutomationProperties.GetName(button)) &&
+                    button.TranslatePoint(new Point(), root).Y == toolbarButtons[0].TranslatePoint(new Point(), root).Y) &&
+                toolbarButtons[0].TranslatePoint(new Point(), root).Y >= scrollBottom &&
+                toolbarButtons[3].TranslatePoint(new Point(), root).X -
+                    toolbarButtons[2].TranslatePoint(new Point(toolbarButtons[2].ActualWidth, 0), root).X >= 24 &&
+                searchBox.Width == 0 && searchBox.Opacity == 0 && !searchBox.IsHitTestVisible, "");
             check("开始面板-首屏贴合实际高度，所有应用在滚动时才创建",
                 scroll.ViewportHeight > 0 && Math.Abs(scroll.ViewportHeight - overviewFrame.ActualHeight) < 1 &&
                 AppsTop() >= scroll.ViewportHeight - 0.5 && ((StackPanel)appsPage).Children.Count == 0, "");
@@ -359,6 +419,48 @@ internal static class LauncherSelfTest
                 !Descendants(groupPage).OfType<ScrollViewer>().Any() && scroll.HorizontalOffset == 0 &&
                 scroll.VerticalOffset == 0 && ((FrameworkElement)cards.Children[1]).TranslatePoint(new Point(), content).Y
                     >= scroll.ViewportHeight - 0.5, $"{tiles.Length} 项 / {content.RenderSize}");
+
+            toolbarButtons[0].RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            var search = (TextBox)window.FindName("Search");
+            search.Text = "Alpha";
+            FlushLayout();
+            check("开始面板-点击底部搜索展开输入框，搜索仍能筛选首项",
+                searchBox.Width > 0 && searchBox.IsHitTestVisible && search.IsTabStop &&
+                Descendants(cards).OfType<Button>().Where(button => button.Tag is LaunchEntry)
+                    .Select(button => (LaunchEntry)button.Tag).SequenceEqual(new[] { alpha }), "");
+
+            var iconLoad = window.ApplyWindowsToolbarIconsAsync();
+            var iconFrame = new DispatcherFrame();
+            var iconDeadline = DateTime.UtcNow.AddSeconds(8);
+            var iconTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(25) };
+            iconTimer.Tick += (_, _) => iconFrame.Continue = !iconLoad.IsCompleted && DateTime.UtcNow < iconDeadline;
+            iconTimer.Start();
+            Dispatcher.PushFrame(iconFrame);
+            iconTimer.Stop();
+            FlushLayout();
+            check("开始面板-系统按钮显示 Windows 应用图标和微软符号，简桌图标保留",
+                iconLoad.IsCompletedSuccessfully &&
+                toolbarButtons.Take(3).All(button => button.Content is System.Windows.Media.DrawingImage
+                    { Drawing: System.Windows.Media.GeometryDrawing { Pen: not null } } && HasRenderedImage(button)) &&
+                toolbarButtons.Skip(3).Take(3).All(button => button.Content is System.Windows.Media.Imaging.BitmapSource && HasRenderedImage(button)) &&
+                toolbarButtons.TakeLast(4).All(button => button.Content is System.Windows.Media.DrawingImage
+                    { Drawing: System.Windows.Media.GeometryDrawing { Pen: null } } && HasRenderedImage(button)), "");
+
+            static bool HasRenderedImage(Button button) => Descendants(button).OfType<Image>()
+                .Any(image => image.Source == button.Content && image.Width == 20 && image.Height == 20 &&
+                    image.Stretch == System.Windows.Media.Stretch.Uniform && image.ActualWidth > 0);
+
+            const int bitmapWidth = 12, bitmapHeight = 10, stride = bitmapWidth * 4;
+            var paddedPixels = new byte[bitmapHeight * stride];
+            paddedPixels[3] = 8;
+            for (var y = 2; y < 6; y++)
+                for (var x = 3; x < 9; x++)
+                    paddedPixels[y * stride + x * 4 + 3] = 255;
+            var paddedIcon = System.Windows.Media.Imaging.BitmapSource.Create(bitmapWidth, bitmapHeight, 96, 96,
+                System.Windows.Media.PixelFormats.Bgra32, null, paddedPixels, stride);
+            var trimmedIcon = LauncherWindow.TrimToolbarIcon(paddedIcon);
+            check("开始面板-系统图标按可见范围去除透明留白并保留比例",
+                trimmedIcon is { PixelWidth: 6, PixelHeight: 4 }, "");
 
             static IEnumerable<DependencyObject> Descendants(DependencyObject visual)
             {

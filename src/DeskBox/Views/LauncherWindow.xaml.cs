@@ -41,6 +41,7 @@ internal partial class LauncherWindow : Window
     private (string Before, string Preview)? _searchComposition;
     private bool _searchRefreshQueued;
     private bool _interacting;
+    private bool _powerActionPending;
     private bool _draggingEntries;
     private bool _sectionVisualsDirty;
     private bool _sectionRefreshQueued;
@@ -59,13 +60,19 @@ internal partial class LauncherWindow : Window
         _config = config;
         _preview = preview;
         InitializeComponent();
+        InitializeToolbarIcons();
         ShowInTaskbar = preview;
+        Loaded += LoadWindowsToolbarIcons;
         PanelRoot.SizeChanged += (_, _) =>
         {
             var bounds = new Rect(PanelRoot.RenderSize);
             PanelRoot.Clip = new RectangleGeometry(bounds, 24, 24);
         };
-        Search.TextChanged += (_, _) => QueueSearchRefresh();
+        Search.TextChanged += (_, _) =>
+        {
+            if (Search.Text.Length != 0) SetSearchExpanded(true);
+            QueueSearchRefresh();
+        };
         TextCompositionManager.AddPreviewTextInputStartHandler(Search, OnSearchComposition);
         TextCompositionManager.AddPreviewTextInputUpdateHandler(Search, OnSearchComposition);
         Search.PreviewTextInput += (_, _) => EndSearchComposition();
@@ -78,14 +85,29 @@ internal partial class LauncherWindow : Window
             if (ItemsScrollbar?.IsMouseCaptureWithin == true) return;
             HideScrollbar(fade: true);
         };
-        SettingsButton.Click += (_, _) => SettingsRequested?.Invoke();
+        SearchButton.Click += (_, _) => FocusSearch();
         AddGroup.Click += (_, _) => CreateGroup();
+        TaskManagerButton.Click += (_, _) => OpenToolbarTarget(TaskManagerPath, "任务管理器");
+        RegistryEditorButton.Click += (_, _) => OpenToolbarTarget(RegistryEditorPath, "注册表编辑器");
+        ExplorerButton.Click += (_, _) => OpenToolbarTarget(ExplorerPath, "文件资源管理器");
+        DocumentsButton.Click += (_, _) => OpenToolbarTarget(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "文档");
+        DownloadsButton.Click += (_, _) => OpenToolbarTarget(
+            ShellItemInterop.GetKnownFolderPath(ShellItemInterop.DownloadsFolderId), "下载");
+        SettingsButton.Click += (_, _) => SettingsRequested?.Invoke();
+        WindowsSettingsButton.Click += (_, _) => OpenToolbarTarget("ms-settings:", "Windows 设置");
+        InstalledAppsButton.Click += (_, _) => OpenToolbarTarget("ms-settings:appsfeatures", "已安装的应用");
+        SleepButton.Click += async (_, _) => await RunPowerActionAsync("睡眠", SystemPower.SleepAsync);
+        RestartButton.Click += async (_, _) => await RunPowerActionAsync("重启",
+            () => SystemPower.ShutDownAsync(restart: true), confirm: true);
+        ShutDownButton.Click += async (_, _) => await RunPowerActionAsync("关机",
+            () => SystemPower.ShutDownAsync(restart: false), confirm: true);
         PreviewKeyDown += OnKeyDown;
         PreviewTextInput += (_, e) =>
         {
             if (_nameEditor is not null || Search.IsKeyboardFocusWithin ||
                 string.IsNullOrWhiteSpace(e.Text) || e.Text.Any(char.IsControl)) return;
-            Search.Focus();
+            FocusSearch();
             Search.SelectedText = e.Text;
             Search.CaretIndex = Search.SelectionStart + Search.SelectionLength;
             e.Handled = true;
@@ -110,7 +132,8 @@ internal partial class LauncherWindow : Window
 
     internal void Open(POINT? anchor = null)
     {
-        Search.Clear();
+        if (IsVisible && Search.IsKeyboardFocusWithin) Keyboard.Focus(PanelRoot);
+        ResetSearch();
         ItemsScroll.ScrollToTop();
         if (IsVisible)
         {
@@ -150,7 +173,7 @@ internal partial class LauncherWindow : Window
             Activate();
         };
 
-        Search.Clear();
+        ResetSearch();
         PositionDockedSettings(settings);
     }
 
@@ -287,6 +310,28 @@ internal partial class LauncherWindow : Window
     private string SearchText => _searchComposition is { } composition && Search.Text == composition.Before
         ? composition.Preview : Search.Text;
 
+    private void SetSearchExpanded(bool expanded)
+    {
+        // Keep the empty TextBox focusable so the first keystroke can start an IME composition.
+        SearchBox.Width = expanded ? 184 : 0;
+        SearchBox.Opacity = expanded ? 1 : 0;
+        SearchBox.IsHitTestVisible = expanded;
+        Search.IsTabStop = expanded;
+    }
+
+    private void FocusSearch()
+    {
+        SetSearchExpanded(true);
+        Search.Focus();
+    }
+
+    private void ResetSearch()
+    {
+        EndSearchComposition();
+        Search.Clear();
+        SetSearchExpanded(false);
+    }
+
     private void OnSearchComposition(object sender, TextCompositionEventArgs e)
     {
         if (e.TextComposition is not FrameworkTextComposition composition) return;
@@ -297,6 +342,7 @@ internal partial class LauncherWindow : Window
         var length = composition.CompositionLength;
         var preview = offset >= 0 && length >= 0 && offset <= text.Length - length
             ? text.Remove(offset, length).Insert(offset, composition.CompositionText) : text;
+        SetSearchExpanded(true);
         _searchComposition = (text, preview);
         QueueSearchRefresh();
     }
@@ -834,8 +880,37 @@ internal partial class LauncherWindow : Window
         SaveChange();
     });
 
+    private void OpenToolbarTarget(string? target, string name)
+    {
+        if (!string.IsNullOrEmpty(target) && FsUtil.TryOpen(target)) Hide();
+        else Interact(() => ShowEntryWarning($"无法打开「{name}」。"));
+    }
+
     private void ShowEntryWarning(string message) =>
         MessageBox.Show(this, message, "简桌", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+    private async Task RunPowerActionAsync(string action, Func<Task> run, bool confirm = false)
+    {
+        if (_powerActionPending) return;
+        _powerActionPending = true;
+        try
+        {
+            var accepted = !confirm;
+            if (confirm)
+                Interact(() => accepted = MessageBox.Show(this, $"确定要{action}吗？请先保存正在编辑的文件。",
+                    action, MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes);
+            if (!accepted) return;
+
+            await run();
+            if (IsVisible) Hide();
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        {
+            Log.Warn($"Windows {action}失败：{ex.Message}");
+            if (IsVisible) Interact(() => ShowEntryWarning($"无法让 Windows {action}。\n{ex.Message}"));
+        }
+        finally { _powerActionPending = false; }
+    }
 
     private ContextMenu GroupMenu(LaunchSection section, LauncherGroupBoard board)
     {
@@ -968,7 +1043,7 @@ internal partial class LauncherWindow : Window
         if (string.IsNullOrEmpty(name)) return;
         var box = new BoxConfig { Title = name, IsVirtual = true };
         _config.Boxes.Add(box);
-        Search.Clear();
+        ResetSearch();
         ItemsScroll.ScrollToTop();
         SaveChange();
     });
@@ -996,14 +1071,18 @@ internal partial class LauncherWindow : Window
 
         if (e.Key == Key.Escape)
         {
-            if (Search.Text.Length != 0) Search.Clear();
+            if (SearchBox.IsHitTestVisible)
+            {
+                ResetSearch();
+                Search.Focus();
+            }
             else if (_preview) Close();
             else Hide();
             e.Handled = true;
         }
         else if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
         {
-            Search.Focus();
+            FocusSearch();
             Search.SelectAll();
             e.Handled = true;
         }

@@ -72,6 +72,13 @@ internal sealed record ShortcutIdentity(string Key, string? UpgradeKey, bool Can
 
     private static ShortcutIdentity? ReadUrl(string path)
     {
+        return ReadInternetAddress(path) is { } uri
+            ? new(JsonSerializer.Serialize(new[] { "url", uri.AbsoluteUri }), null, true)
+            : null;
+    }
+
+    internal static Uri? ReadInternetAddress(string path)
+    {
         var inSection = false;
         foreach (var line in File.ReadLines(path))
         {
@@ -80,7 +87,7 @@ internal sealed record ShortcutIdentity(string Key, string? UpgradeKey, bool Can
                 inSection = text.Equals("[InternetShortcut]", StringComparison.OrdinalIgnoreCase);
             else if (inSection && text.StartsWith("URL=", StringComparison.OrdinalIgnoreCase) &&
                 Uri.TryCreate(text[4..].Trim(), UriKind.Absolute, out var uri))
-                return new(JsonSerializer.Serialize(new[] { "url", uri.AbsoluteUri }), null, true);
+                return uri;
         }
         return null;
     }

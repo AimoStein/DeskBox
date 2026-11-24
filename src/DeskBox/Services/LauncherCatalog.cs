@@ -48,18 +48,22 @@ internal sealed record LaunchEntry(string Path, string Name)
 
 internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IReadOnlyList<LaunchEntry> Installed)
 {
+    internal IReadOnlyDictionary<string, LauncherShortcutState> UnavailableShortcuts { get; init; } =
+        new Dictionary<string, LauncherShortcutState>(StringComparer.OrdinalIgnoreCase);
+
     internal static string[] ProgramsFolders() => new[]
     {
         Environment.GetFolderPath(Environment.SpecialFolder.Programs),
         Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms),
     }.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
-    internal static Task<LauncherCatalog> ScanAsync(DesktopShell shell, string excluded, bool showHidden)
+    internal static Task<LauncherCatalog> ScanAsync(DesktopShell shell, string excluded, bool showHidden,
+        IReadOnlyList<string> references, IReadOnlyList<string> legacyFolders)
     {
         var result = new TaskCompletionSource<LauncherCatalog>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
-            try { result.SetResult(Scan(shell, excluded, showHidden)); }
+            try { result.SetResult(Scan(shell, excluded, showHidden, references, legacyFolders)); }
             catch (Exception ex) { result.SetException(ex); }
         }) { IsBackground = true, Name = "DeskBox Launcher Catalog" };
         thread.SetApartmentState(ApartmentState.STA);
@@ -67,7 +71,8 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
         return result.Task;
     }
 
-    private static LauncherCatalog Scan(DesktopShell shell, string excluded, bool showHidden)
+    private static LauncherCatalog Scan(DesktopShell shell, string excluded, bool showHidden,
+        IReadOnlyList<string> references, IReadOnlyList<string> legacyFolders)
     {
         var desktop = shell.EnumerateItems(excluded, showHidden).Select(path => LaunchEntry.FromPath(path)).ToList();
         if (DesktopViewInterop.ReadLayout() is { } layout)
@@ -78,10 +83,25 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
                 new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true,
                     AttributesToSkip = FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint }))
             .Where(LaunchEntry.IsShortcutFile).Select(path => LaunchEntry.FromPath(path)).ToList();
-        var shortcutNames = installed.Select(item => item.Name).ToHashSet(StringComparer.CurrentCultureIgnoreCase);
+        var unavailable = FindUnavailableShortcuts(desktop.Concat(installed).Select(item => item.Path)
+            .Concat(references).Concat(legacyFolders.SelectMany(ReadLegacyBox).Select(item => item.Path)));
+        var shortcutNames = installed.Where(item => !unavailable.ContainsKey(item.Path))
+            .Select(item => item.Name).ToHashSet(StringComparer.CurrentCultureIgnoreCase);
         installed.AddRange(ReadAppsFolder().Where(item => !shortcutNames.Contains(item.Name)));
         return new LauncherCatalog(desktop.DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToArray(),
-            installed.DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToArray());
+            installed.DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToArray())
+            { UnavailableShortcuts = unavailable };
+    }
+
+    internal static IReadOnlyDictionary<string, LauncherShortcutState> FindUnavailableShortcuts(IEnumerable<string> paths)
+    {
+        var unavailable = new Dictionary<string, LauncherShortcutState>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var state = LauncherShortcutCheck.Read(path);
+            if (state != LauncherShortcutState.Unverified) unavailable.Add(path, state);
+        }
+        return unavailable;
     }
 
     private static IReadOnlyList<LaunchEntry> ReadAppsFolder()
@@ -131,9 +151,32 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
         if (value is not null && Marshal.IsComObject(value)) Marshal.ReleaseComObject(value);
     }
 
-    internal LauncherCatalog WithoutPath(string path) =>
-        new(Desktop.Where(item => !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)).ToArray(),
-            Installed.Where(item => !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)).ToArray());
+    internal LauncherCatalog WithoutPath(string path) => this with
+    {
+        Desktop = Desktop.Where(item => !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)).ToArray(),
+        Installed = Installed.Where(item => !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)).ToArray(),
+    };
+
+    internal bool PruneMissingReferences(AppConfig config, LauncherCatalog previous)
+    {
+        // Require two scans so an Explorer rewrite or brief move doesn't drop a saved reference.
+        var missing = VirtualGroups.References(config).Select(entry => entry.Path)
+            .Where(path => UnavailableShortcuts.GetValueOrDefault(path) == LauncherShortcutState.MissingFile &&
+                previous.UnavailableShortcuts.GetValueOrDefault(path) == LauncherShortcutState.MissingFile)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (missing.Count == 0) return false;
+
+        foreach (var box in config.Boxes.Where(box => box.IsVirtual))
+            VirtualGroups.Remove(box, missing);
+        config.LauncherUngroupedEntries.RemoveAll(entry => missing.Contains(entry.Path));
+        foreach (var path in missing)
+        {
+            config.LauncherOpenCounts.Remove(path);
+            config.LauncherDisplayNames.Remove(path);
+        }
+        Log.Info($"开始面板：清理了 {missing.Count} 个已不存在的快捷方式引用。");
+        return true;
+    }
 
     internal static IOrderedEnumerable<LaunchEntry> OrderByUsage(IEnumerable<LaunchEntry> items, AppConfig config) =>
         items.OrderByDescending(item => config.LauncherOpenCounts.GetValueOrDefault(item.Path))
@@ -217,10 +260,9 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
             var entries = box.IsVirtual
                 ? box.Entries.Where(entry => !string.IsNullOrWhiteSpace(entry.Path))
                     .Select(entry => LaunchEntry.FromPath(entry.Path, entry.DisplayName)).ToList()
-                : ReadLegacyBox(box, config);
+                : ReadLegacyBox(LegacyBoxFolder(box, config));
             assigned.UnionWith(entries.Select(entry => entry.Path));
-            // An interrupted .lnk rewrite can leave a vanished .lnk~RF*.TMP
-            // beside the real shortcut. Keep genuine entries, including broken links.
+            // An interrupted .lnk rewrite can leave a vanished .lnk~RF*.TMP beside the real shortcut.
             var groupPaths = entries.Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             entries.RemoveAll(entry => LaunchEntry.MissingLinkRewriteSource(entry.Path) is { } source &&
                 groupPaths.Contains(source) && File.Exists(source));
@@ -236,13 +278,15 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
         return sections;
 
         LaunchEntry[] SortEntries(IEnumerable<LaunchEntry> items) =>
-            OrderByUsage(items.Select(item => WithDisplayName(item, config)), config).ToArray();
+            OrderByUsage(items.Where(item => !UnavailableShortcuts.ContainsKey(item.Path))
+                .Select(item => WithDisplayName(item, config)), config).ToArray();
     }
 
-    private static List<LaunchEntry> ReadLegacyBox(BoxConfig box, AppConfig config)
+    internal static string LegacyBoxFolder(BoxConfig box, AppConfig config) => string.IsNullOrWhiteSpace(box.Folder)
+        ? Path.Combine(config.EffectiveBoxRoot, FsUtil.Sanitize(box.Title)) : box.Folder;
+
+    private static List<LaunchEntry> ReadLegacyBox(string folder)
     {
-        var folder = string.IsNullOrWhiteSpace(box.Folder)
-            ? Path.Combine(config.EffectiveBoxRoot, FsUtil.Sanitize(box.Title)) : box.Folder;
         try
         {
             return Directory.EnumerateFileSystemEntries(folder)
