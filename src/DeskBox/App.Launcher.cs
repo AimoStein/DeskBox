@@ -213,8 +213,12 @@ public partial class App
             var catalog = await LauncherCatalog.ScanAsync(_shell, _config.EffectiveBoxRoot, _config.ShowHiddenFiles,
                 references, legacyFolders);
             if (_exiting || revision != _launcherCatalogRevision) return;
-            if (_ownsConfig && catalog.PruneMissingReferences(_config, _launcherCatalog))
-                ScheduleSave();
+            var restored = catalog.RestoreRewrittenShortcuts(_config);
+            if (_ownsConfig)
+            {
+                var pruned = catalog.PruneMissingReferences(_config, _launcherCatalog);
+                if (restored || pruned) ScheduleSave();
+            }
             _launcherCatalog = catalog;
             RefreshLauncherWatchers();
             RefreshLauncher();
@@ -276,8 +280,12 @@ public partial class App
     {
         if (_exiting) return;
         _launcherCatalogRevision++;
-        if (args is RenamedEventArgs rename && VirtualGroups.RenameReference(_config, rename.OldFullPath, rename.FullPath))
-            LauncherConfigChanged();
+        if (args is RenamedEventArgs rename)
+        {
+            IconCache.Invalidate(rename.OldFullPath);
+            if (LauncherCatalog.RenameReference(_config, rename.OldFullPath, rename.FullPath))
+                LauncherConfigChanged();
+        }
         IconCache.Invalidate(args.FullPath);
         RequestLauncherScan();
     });

@@ -26,11 +26,17 @@ internal sealed record LaunchEntry(string Path, string Name)
         IsShortcut && System.IO.Path.IsPathFullyQualified(Path) && File.Exists(Path) &&
         NativeMethods.DeleteToRecycleBin(Path, owner, warnIfPermanent: true);
 
-    internal static string? MissingLinkRewriteSource(string path)
+    internal static string? LinkRewriteSource(string path)
     {
-        var marker = path.LastIndexOf(".lnk~RF", StringComparison.OrdinalIgnoreCase);
-        return marker >= 0 && path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) &&
-            !File.Exists(path) ? path[..(marker + 4)] : null;
+        if (VirtualGroups.IsShell(path) || !System.IO.Path.IsPathFullyQualified(path) ||
+            !path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) return null;
+        var name = System.IO.Path.GetFileName(path);
+        var marker = name.LastIndexOf(".lnk~RF", StringComparison.OrdinalIgnoreCase);
+        const int markerLength = 7, extensionLength = 4;
+        if (marker <= 0 || marker + markerLength >= name.Length - extensionLength) return null;
+        foreach (var character in name.AsSpan((marker + markerLength)..^extensionLength))
+            if (!char.IsAsciiHexDigit(character)) return null;
+        return path[..(path.Length - name.Length + marker + 4)];
     }
 
     private static string NameOf(string path)
@@ -84,7 +90,8 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
                     AttributesToSkip = FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint }))
             .Where(LaunchEntry.IsShortcutFile).Select(path => LaunchEntry.FromPath(path)).ToList();
         var unavailable = FindUnavailableShortcuts(desktop.Concat(installed).Select(item => item.Path)
-            .Concat(references).Concat(legacyFolders.SelectMany(ReadLegacyBox).Select(item => item.Path)));
+            .Concat(references).Concat(references.Select(LaunchEntry.LinkRewriteSource).OfType<string>())
+            .Concat(legacyFolders.SelectMany(ReadLegacyBox).Select(item => item.Path)));
         var shortcutNames = installed.Where(item => !unavailable.ContainsKey(item.Path))
             .Select(item => item.Name).ToHashSet(StringComparer.CurrentCultureIgnoreCase);
         installed.AddRange(ReadAppsFolder().Where(item => !shortcutNames.Contains(item.Name)));
@@ -156,6 +163,65 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
         Desktop = Desktop.Where(item => !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)).ToArray(),
         Installed = Installed.Where(item => !string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)).ToArray(),
     };
+
+    internal static bool RenameReference(AppConfig config, string oldPath, string newPath) =>
+        LaunchEntry.LinkRewriteSource(oldPath) is null && LaunchEntry.LinkRewriteSource(newPath) is null &&
+        VirtualGroups.RenameReference(config, oldPath, newPath);
+
+    internal bool RestoreRewrittenShortcuts(AppConfig config)
+    {
+        var boxes = config.Boxes.Where(box => box.IsVirtual).ToArray();
+        var repairs = VirtualGroups.References(config).Select(entry => entry.Path)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(path => (Path: path, Source: LaunchEntry.LinkRewriteSource(path)))
+            .Where(item => item.Source is not null)
+            .GroupBy(item => item.Source!, StringComparer.OrdinalIgnoreCase);
+        var restored = 0;
+        foreach (var repair in repairs)
+        {
+            var source = repair.Key;
+            if (UnavailableShortcuts.ContainsKey(source) || !File.Exists(source)) continue;
+
+            var paths = repair.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            paths.Add(source);
+            // Prefer an existing placement of the real shortcut, then the first grouped reference.
+            var grouped = boxes.SelectMany(box => box.Entries).Where(entry => paths.Contains(entry.Path)).ToArray();
+            var winner = grouped.FirstOrDefault(entry => SamePath(entry.Path, source)) ?? grouped.FirstOrDefault() ??
+                config.LauncherUngroupedEntries.FirstOrDefault(entry => SamePath(entry.Path, source)) ??
+                config.LauncherUngroupedEntries.First(entry => paths.Contains(entry.Path));
+
+            foreach (var item in repair)
+                VirtualGroups.RenameReference(config, item.Path, source);
+
+            foreach (var box in boxes)
+            {
+                RemoveDuplicates(box.Entries);
+                var keepPosition = box.Entries.Contains(winner);
+                box.ItemOrder.RemoveAll(path =>
+                {
+                    if (!SamePath(path, source)) return false;
+                    if (!keepPosition) return true;
+                    keepPosition = false;
+                    return false;
+                });
+            }
+            RemoveDuplicates(config.LauncherUngroupedEntries);
+            restored++;
+
+            void RemoveDuplicates(List<GroupEntry> entries) => entries.RemoveAll(entry =>
+            {
+                if (entry == winner || !SamePath(entry.Path, source)) return false;
+                if (string.IsNullOrWhiteSpace(winner.DisplayName)) winner.DisplayName = entry.DisplayName;
+                winner.ShortcutIdentity ??= entry.ShortcutIdentity;
+                winner.ShortcutUpgradeIdentity ??= entry.ShortcutUpgradeIdentity;
+                return true;
+            });
+        }
+        if (restored > 0) Log.Info($"开始面板：恢复了 {restored} 个更新时被记录为临时文件的快捷方式。");
+        return restored > 0;
+    }
+
+    private static bool SamePath(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
     internal bool PruneMissingReferences(AppConfig config, LauncherCatalog previous)
     {
@@ -262,10 +328,6 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
                     .Select(entry => LaunchEntry.FromPath(entry.Path, entry.DisplayName)).ToList()
                 : ReadLegacyBox(LegacyBoxFolder(box, config));
             assigned.UnionWith(entries.Select(entry => entry.Path));
-            // An interrupted .lnk rewrite can leave a vanished .lnk~RF*.TMP beside the real shortcut.
-            var groupPaths = entries.Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            entries.RemoveAll(entry => LaunchEntry.MissingLinkRewriteSource(entry.Path) is { } source &&
-                groupPaths.Contains(source) && File.Exists(source));
             sections.Add(new LaunchSection(box, box.Title, SortEntries(entries)));
         }
         var ungrouped = Desktop.Concat(config.LauncherUngroupedEntries
@@ -278,7 +340,8 @@ internal sealed record LauncherCatalog(IReadOnlyList<LaunchEntry> Desktop, IRead
         return sections;
 
         LaunchEntry[] SortEntries(IEnumerable<LaunchEntry> items) =>
-            OrderByUsage(items.Where(item => !UnavailableShortcuts.ContainsKey(item.Path))
+            OrderByUsage(items.Where(item => LaunchEntry.LinkRewriteSource(item.Path) is null &&
+                    !UnavailableShortcuts.ContainsKey(item.Path))
                 .Select(item => WithDisplayName(item, config)), config).ToArray();
     }
 

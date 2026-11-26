@@ -152,6 +152,51 @@ internal static class LauncherSelfTest
             !cleanupGroup.ItemOrder.Contains(missingShortcut) && !cleanupConfig.LauncherOpenCounts.ContainsKey(missingShortcut) &&
             cleanupGroup.Entries.Any(entry => entry.Path == malformedLink), "");
 
+        File.WriteAllText(launchTarget, "launcher target");
+        var rewritten = WriteLink("Updated.lnk", "", shortcutFolder);
+        var firstTemp = rewritten.Path + "~RF11fd7.TMP";
+        var secondTemp = rewritten.Path + "~RFc4f4e.tmp";
+        var ordinaryTemp = LaunchEntry.FromPath(rewritten.Path + "~RFnotes.tmp");
+        var rewriteConfig = new AppConfig();
+        var rewriteGroup = new BoxConfig { Title = "工作", IsVirtual = true };
+        rewriteConfig.Boxes.Add(rewriteGroup);
+        VirtualGroups.Add(rewriteConfig, rewriteGroup, new[] { new GroupEntry { Path = rewritten.Path } });
+        File.Move(rewritten.Path, firstTemp);
+        var whileRewriting = new LauncherCatalog(new[] { LaunchEntry.FromPath(firstTemp), ordinaryTemp },
+            Array.Empty<LaunchEntry>());
+        check("开始面板-快捷方式重写的临时文件不会成为分组路径或新图标",
+            !LauncherCatalog.RenameReference(rewriteConfig, rewritten.Path, firstTemp) &&
+            !LauncherCatalog.RenameReference(rewriteConfig, firstTemp, rewritten.Path) &&
+            rewriteGroup.Entries.Single().Path == rewritten.Path &&
+            whileRewriting.Sections(rewriteConfig)[1].Items.SequenceEqual(new[] { ordinaryTemp }), "");
+
+        VirtualGroups.Remove(rewriteGroup, new[] { rewritten.Path });
+        VirtualGroups.Add(rewriteConfig, rewriteGroup, new[]
+        {
+            new GroupEntry { Path = firstTemp, ShortcutIdentity = "saved identity" },
+            new GroupEntry { Path = ordinaryTemp.Path },
+            new GroupEntry { Path = secondTemp },
+        });
+        rewriteConfig.LauncherUngroupedEntries.Add(new GroupEntry { Path = rewritten.Path });
+        rewriteConfig.RecordLauncherOpen(secondTemp);
+        rewriteConfig.LauncherDisplayNames[secondTemp] = "我的启动器";
+        check("开始面板-等待重写完成时，保留旧分组引用并隐藏临时项",
+            !whileRewriting.RestoreRewrittenShortcuts(rewriteConfig) && rewriteGroup.Entries.Count == 3 &&
+            whileRewriting.Sections(rewriteConfig)[0].Items.SequenceEqual(new[] { ordinaryTemp }), "");
+
+        File.Move(firstTemp, rewritten.Path);
+        var afterRewrite = new LauncherCatalog(new[] { rewritten }, Array.Empty<LaunchEntry>());
+        var didRestore = afterRewrite.RestoreRewrittenShortcuts(rewriteConfig);
+        var repaired = afterRewrite.Sections(rewriteConfig);
+        check("开始面板-旧临时引用恢复到原分组，合并副本并保留打开次数和自定义名称",
+            didRestore && !afterRewrite.RestoreRewrittenShortcuts(rewriteConfig) &&
+            rewriteGroup.Entries.First() is { ShortcutIdentity: "saved identity" } first && first.Path == rewritten.Path &&
+            rewriteGroup.ItemOrder.SequenceEqual(new[] { rewritten.Path, ordinaryTemp.Path }) &&
+            rewriteConfig.LauncherUngroupedEntries.Count == 0 && repaired[1].Items.Count == 0 &&
+            repaired[0].Items.SequenceEqual(new[] { rewritten with { Name = "我的启动器" }, ordinaryTemp }) &&
+            rewriteConfig.LauncherOpenCounts.Keys.SequenceEqual(new[] { rewritten.Path }) &&
+            rewriteConfig.LauncherOpenCounts[rewritten.Path] == 1 && File.Exists(rewritten.Path), "");
+
         LaunchEntry WriteLink(string name, string args, string directory)
         {
             var path = ShortcutFactory.CreateInFolder(shortcutFolder, launchTarget, name);
@@ -192,7 +237,7 @@ internal static class LauncherSelfTest
         var renamed = Path.Combine(sandbox, "Renamed.lnk");
         config.LauncherDisplayNames[zulu.Path] = "我的 Zulu";
         check("开始面板-快捷方式改名保留打开次数",
-            VirtualGroups.RenameReference(config, zulu.Path, renamed) &&
+            LauncherCatalog.RenameReference(config, zulu.Path, renamed) &&
             config.LauncherOpenCounts.GetValueOrDefault(renamed) == 2 &&
             !config.LauncherOpenCounts.ContainsKey(zulu.Path), "");
         check("开始面板-原文件更名后保留自定义名称",
@@ -319,7 +364,14 @@ internal static class LauncherSelfTest
         }
 
         LauncherGroupBoard.AssignSlots(config.Boxes);
-        var window = new LauncherWindow(config);
+        var powerActions = new List<string>();
+        Task RecordPowerAction(string action)
+        {
+            powerActions.Add(action);
+            return Task.CompletedTask;
+        }
+        var window = new LauncherWindow(config, sleep: () => RecordPowerAction("睡眠"),
+            shutDown: restart => RecordPowerAction(restart ? "重启" : "关机"));
         try
         {
             window.SetSections(allAppSections);
@@ -352,6 +404,11 @@ internal static class LauncherSelfTest
                 toolbarButtons[3].TranslatePoint(new Point(), root).X -
                     toolbarButtons[2].TranslatePoint(new Point(toolbarButtons[2].ActualWidth, 0), root).X >= 24 &&
                 searchBox.Width == 0 && searchBox.Opacity == 0 && !searchBox.IsHitTestVisible, "");
+            var powerButtonNames = new[] { "SleepButton", "RestartButton", "ShutDownButton" };
+            foreach (var name in powerButtonNames)
+                ((Button)window.FindName(name)).RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            check("开始面板-睡眠、重启和关机单击直接执行对应动作",
+                powerActions.SequenceEqual(new[] { "睡眠", "重启", "关机" }), "");
             check("开始面板-首屏贴合实际高度，所有应用在滚动时才创建",
                 scroll.ViewportHeight > 0 && Math.Abs(scroll.ViewportHeight - overviewFrame.ActualHeight) < 1 &&
                 AppsTop() >= scroll.ViewportHeight - 0.5 && ((StackPanel)appsPage).Children.Count == 0, "");

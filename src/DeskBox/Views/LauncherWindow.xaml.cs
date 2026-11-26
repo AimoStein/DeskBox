@@ -55,7 +55,8 @@ internal partial class LauncherWindow : Window
     internal event Action<string>? ShortcutDeleted;
     internal event Action? SettingsRequested;
 
-    internal LauncherWindow(AppConfig config, bool preview = false)
+    internal LauncherWindow(AppConfig config, bool preview = false,
+        Func<Task>? sleep = null, Func<bool, Task>? shutDown = null)
     {
         _config = config;
         _preview = preview;
@@ -97,11 +98,11 @@ internal partial class LauncherWindow : Window
         SettingsButton.Click += (_, _) => SettingsRequested?.Invoke();
         WindowsSettingsButton.Click += (_, _) => OpenToolbarTarget("ms-settings:", "Windows 设置");
         InstalledAppsButton.Click += (_, _) => OpenToolbarTarget("ms-settings:appsfeatures", "已安装的应用");
-        SleepButton.Click += async (_, _) => await RunPowerActionAsync("睡眠", SystemPower.SleepAsync);
-        RestartButton.Click += async (_, _) => await RunPowerActionAsync("重启",
-            () => SystemPower.ShutDownAsync(restart: true), confirm: true);
-        ShutDownButton.Click += async (_, _) => await RunPowerActionAsync("关机",
-            () => SystemPower.ShutDownAsync(restart: false), confirm: true);
+        var sleepAsync = sleep ?? SystemPower.SleepAsync;
+        var shutDownAsync = shutDown ?? SystemPower.ShutDownAsync;
+        SleepButton.Click += async (_, _) => await RunPowerActionAsync("睡眠", sleepAsync);
+        RestartButton.Click += async (_, _) => await RunPowerActionAsync("重启", () => shutDownAsync(true));
+        ShutDownButton.Click += async (_, _) => await RunPowerActionAsync("关机", () => shutDownAsync(false));
         PreviewKeyDown += OnKeyDown;
         PreviewTextInput += (_, e) =>
         {
@@ -867,13 +868,13 @@ internal partial class LauncherWindow : Window
         }
         foreach (var box in _config.Boxes.Where(box => box.IsVirtual))
         {
-            var staleCopies = box.Entries.Where(entry => string.Equals(LaunchEntry.MissingLinkRewriteSource(entry.Path),
+            var staleCopies = box.Entries.Where(entry => string.Equals(LaunchEntry.LinkRewriteSource(entry.Path),
                 path, StringComparison.OrdinalIgnoreCase)).Select(entry => entry.Path);
             VirtualGroups.Remove(box, staleCopies.Append(path));
         }
         _config.LauncherUngroupedEntries.RemoveAll(entry =>
             string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(LaunchEntry.MissingLinkRewriteSource(entry.Path), path, StringComparison.OrdinalIgnoreCase));
+            string.Equals(LaunchEntry.LinkRewriteSource(entry.Path), path, StringComparison.OrdinalIgnoreCase));
         _config.LauncherOpenCounts.Remove(path);
         _config.LauncherDisplayNames.Remove(path);
         ShortcutDeleted?.Invoke(path);
@@ -889,18 +890,12 @@ internal partial class LauncherWindow : Window
     private void ShowEntryWarning(string message) =>
         MessageBox.Show(this, message, "简桌", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-    private async Task RunPowerActionAsync(string action, Func<Task> run, bool confirm = false)
+    private async Task RunPowerActionAsync(string action, Func<Task> run)
     {
         if (_powerActionPending) return;
         _powerActionPending = true;
         try
         {
-            var accepted = !confirm;
-            if (confirm)
-                Interact(() => accepted = MessageBox.Show(this, $"确定要{action}吗？请先保存正在编辑的文件。",
-                    action, MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes);
-            if (!accepted) return;
-
             await run();
             if (IsVisible) Hide();
         }
